@@ -47,12 +47,12 @@ def dispatch(job: Dict) -> Dict:
     """
     Dispatch a job to the appropriate pipeline.
 
-    Expected job schema (minimum):
+    Canonical job schema:
 
     {
         "job_id": "uuid",
-        "job_type": "TRANSCRIPTION" | "OCR",
-        "input_type": "VIDEO" | "AUDIO" | "PDF",
+        "job_type": "OCR" | "TRANSCRIBE",
+        "input_type": "PDF" | "YOUTUBE" | "AUDIO",
         ...
     }
     """
@@ -63,24 +63,16 @@ def dispatch(job: Dict) -> Dict:
     validate_job(job)
 
     job_id = job.get("job_id", "unknown")
-    job_type = job["job_type"].upper()
-    input_type = job["input_type"].upper()
+    job_type = job.get("job_type", "").upper()
+    input_type = job.get("input_type", "").upper()
 
     log(f"Job ID: {job_id}")
     log(f"Job type: {job_type}, Input type: {input_type}")
 
     try:
-        if job_type == "TRANSCRIPTION":
-            if input_type in ("VIDEO", "AUDIO"):
-                log("Routing to audio/video transcription pipeline")
-                result = run_audio_transcription(job)
-                log_ok("Transcription pipeline completed")
-                return result
-
-            raise UnsupportedJobError(
-                f"TRANSCRIPTION does not support input_type={input_type}"
-            )
-
+        # --------------------------------------------------
+        # OCR PIPELINE
+        # --------------------------------------------------
         if job_type == "OCR":
             if input_type == "PDF":
                 log("Routing to PDF OCR pipeline")
@@ -92,7 +84,26 @@ def dispatch(job: Dict) -> Dict:
                 f"OCR does not support input_type={input_type}"
             )
 
-        raise UnsupportedJobError(f"Unsupported job_type={job_type}")
+        # --------------------------------------------------
+        # TRANSCRIPTION PIPELINE
+        # --------------------------------------------------
+        if job_type in ("TRANSCRIBE", "TRANSCRIPTION"):
+            if input_type in ("YOUTUBE", "VIDEO", "AUDIO"):
+                log("Routing to audio/video transcription pipeline")
+                result = run_audio_transcription(job)
+                log_ok("Transcription pipeline completed")
+                return result
+
+            raise UnsupportedJobError(
+                f"TRANSCRIBE does not support input_type={input_type}"
+            )
+
+        # --------------------------------------------------
+        # UNKNOWN JOB
+        # --------------------------------------------------
+        raise UnsupportedJobError(
+            f"Unsupported job_type={job_type}"
+        )
 
     except Exception as e:
         log_err(f"Dispatcher failed for job_id={job_id}: {e}")
@@ -132,17 +143,19 @@ def validate_job(job: Dict):
             raise ValueError("'local_path' must be a string")
 
     # ---- Transcription Job ----
-    elif job_type == "TRANSCRIPTION":
-        if input_type not in ("VIDEO", "AUDIO"):
+    # ---- Transcription Job ----
+    elif job_type in ("TRANSCRIBE", "TRANSCRIPTION"):
+        if input_type not in ("VIDEO", "AUDIO", "YOUTUBE"):
             raise ValueError(
-                "TRANSCRIPTION jobs require input_type=VIDEO or AUDIO"
+                "TRANSCRIBE jobs require input_type=VIDEO, AUDIO, or YOUTUBE"
             )
 
         if "url" not in job:
-            raise ValueError("TRANSCRIPTION jobs require 'url'")
+            raise ValueError("TRANSCRIBE jobs require 'url'")
 
         if not isinstance(job["url"], str):
             raise ValueError("'url' must be a string")
+
 
     else:
         raise ValueError(f"Unsupported job_type: {job_type}")

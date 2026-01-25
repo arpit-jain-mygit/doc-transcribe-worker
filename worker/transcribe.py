@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Audio / Video Transcription Engine
-Callable worker module (local-first)
+Callable worker module (Vertex AI Gemini – billing-backed)
 """
 
 import os
@@ -13,8 +13,13 @@ from datetime import datetime
 from typing import Dict
 
 import yt_dlp
-from google import genai
 from dotenv import load_dotenv
+
+from google.cloud import aiplatform
+from vertexai.preview.generative_models import (
+    GenerativeModel,
+    Part,
+)
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -29,6 +34,8 @@ load_dotenv()
 # =========================================================
 # CONFIG
 # =========================================================
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
 
 CACHE_DIR = ".cache"
@@ -38,14 +45,19 @@ TRANSCRIPTS_DIR = "transcripts"
 os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 PROMPT_FILE = os.environ.get("PROMPT_FILE")
 PROMPT_NAME = os.environ.get("PROMPT_NAME")
 
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not set")
+if not PROJECT_ID:
+    raise RuntimeError("GCP_PROJECT_ID not set")
 if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
+
+# =========================================================
+# INIT VERTEX AI (SAME AS OCR)
+# =========================================================
+aiplatform.init(project=PROJECT_ID, location=LOCATION)
+model = GenerativeModel(MODEL_NAME)
 
 # =========================================================
 # LOGGING HELPERS
@@ -69,15 +81,13 @@ def log_err(msg: str):
 # yt-dlp QUIET LOGGER
 # =========================================================
 class YTDLPQuietLogger:
-    def debug(self, msg):
-        pass
-    def warning(self, msg):
-        pass
+    def debug(self, msg): pass
+    def warning(self, msg): pass
     def error(self, msg):
         log_err(f"yt-dlp error: {msg}")
 
 # =========================================================
-# PROMPT LOADER
+# PROMPT LOADER (UNCHANGED)
 # =========================================================
 def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
     log(f"Loading prompt '{prompt_name}' from {prompt_file}")
@@ -99,13 +109,6 @@ def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
     return prompt
 
 AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
-
-# =========================================================
-# GEMINI CLIENT
-# =========================================================
-log("Initializing Gemini client")
-client = genai.Client(api_key=GEMINI_API_KEY)
-log_ok("Gemini client ready")
 
 # =========================================================
 # UTILITIES
@@ -177,34 +180,28 @@ def download_youtube_audio(url: str) -> Dict:
     return {"mp3_path": mp3_path, "title": title, "video_id": video_id}
 
 # =========================================================
-# GEMINI TRANSCRIPTION
+# VERTEX AI TRANSCRIPTION (KEY FIX)
 # =========================================================
 def transcribe_audio(mp3_path: str) -> str:
-    log(f"Uploading audio to Gemini: {os.path.basename(mp3_path)}")
+    log(f"Sending audio to Vertex AI: {os.path.basename(mp3_path)}")
     start = time.perf_counter()
 
     with open(mp3_path, "rb") as f:
-        uploaded = client.files.upload(
-            file=f,
-            config={"mime_type": "audio/mpeg"}
-        )
+        audio_bytes = f.read()
 
-    log_ok(
-        f"Audio uploaded "
-        f"({time.perf_counter() - start:.2f}s)"
-    )
-
-    log("Requesting transcription from Gemini")
-    start = time.perf_counter()
-
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=[uploaded, AUDIO_PROMPT],
-        config={"temperature": 0.1},
+    response = model.generate_content(
+        [
+            Part.from_text(AUDIO_PROMPT),
+            Part.from_data(audio_bytes, mime_type="audio/mpeg"),
+        ],
+        generation_config={
+            "temperature": 0,
+            "max_output_tokens": 8192,
+        },
     )
 
     log_ok(
-        f"Gemini transcription completed "
+        f"Vertex transcription completed "
         f"({time.perf_counter() - start:.2f}s)"
     )
 
@@ -221,16 +218,19 @@ def run_audio_transcription(job: Dict) -> Dict:
     """
     job:
       {
-        "input_type": "VIDEO",
-        "url": "...",
+        "job_id": "...",
+        "job_type": "TRANSCRIBE",
+        "input_type": "YOUTUBE" | "AUDIO",
+        "url": "..."
       }
     """
 
     pipeline_start = time.perf_counter()
+    job_id = job.get("job_id")
     url = job["url"]
 
     log("============================================================")
-    log("Starting audio/video transcription job")
+    log(f"Starting transcription job | job_id={job_id}")
     log(f"Input URL: {url}")
     log("============================================================")
 
@@ -252,8 +252,12 @@ def run_audio_transcription(job: Dict) -> Dict:
     log(f"Total time: {total_time:.2f}s")
     log("============================================================")
 
+    filename = os.path.basename(out_path)
+
     return {
+        "job_id": job_id,
         "status": "COMPLETED",
         "output_path": out_path,
+        "output_filename": filename,  # ✅ ADD THIS
         "duration_sec": round(total_time, 2),
     }
