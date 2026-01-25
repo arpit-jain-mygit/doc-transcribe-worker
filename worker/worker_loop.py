@@ -177,9 +177,12 @@ def run_worker():
 
                 exec_time = time.perf_counter() - start_exec
 
+                output_path = result.get("output_path", "")
+
                 update_job_status(job_id, {
                     "status": "COMPLETED",
-                    "output_path": result.get("output_path", ""),
+                    "output_path": output_path,
+                    "output_filename": os.path.basename(output_path) if output_path else "",
                 })
 
                 redis_client.delete(attempt_key)
