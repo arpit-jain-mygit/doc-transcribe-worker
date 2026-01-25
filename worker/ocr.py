@@ -11,6 +11,7 @@ import io
 from datetime import datetime
 from typing import Dict
 
+import redis
 from pdf2image import convert_from_path
 from PIL import Image
 
@@ -32,6 +33,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
+
+REDIS_URL = os.environ.get("REDIS_URL")
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 DPI = 300
 OUTPUT_DIR = "output_texts"
@@ -57,22 +61,10 @@ aiplatform.init(project=PROJECT_ID, location=LOCATION)
 model = GenerativeModel(MODEL_NAME)
 
 # =========================================================
-# LOGGING HELPERS
+# LOGGING
 # =========================================================
-def ts():
-    return datetime.now().strftime("%H:%M:%S")
-
 def log(msg: str):
-    print(f"[OCR {ts()}] {msg}", flush=True)
-
-def log_ok(msg: str):
-    log(f"✅ {msg}")
-
-def log_warn(msg: str):
-    log(f"⚠️  {msg}")
-
-def log_err(msg: str):
-    log(f"❌ {msg}")
+    print(f"[OCR {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 # =========================================================
 # UTIL
@@ -86,13 +78,10 @@ def pil_to_png_bytes(image: Image.Image) -> bytes:
 # GEMINI OCR CALL
 # =========================================================
 def gemini_ocr(prompt: str, image: Image.Image, page_num: int):
-    log(f"Page {page_num}: Preparing image bytes")
     png_bytes = pil_to_png_bytes(image)
-
-    log(f"Page {page_num}: Sending request to Gemini")
-    start = time.perf_counter()
-
     vertex_image = VertexImage.from_bytes(png_bytes)
+
+    start = time.perf_counter()
     response = model.generate_content(
         [
             Part.from_text(prompt),
@@ -105,88 +94,94 @@ def gemini_ocr(prompt: str, image: Image.Image, page_num: int):
         },
     )
 
-    log_ok(
-        f"Page {page_num}: Gemini response received "
-        f"({time.perf_counter() - start:.2f}s)"
-    )
-
+    log(f"Page {page_num}: Gemini completed in {time.perf_counter() - start:.2f}s")
     return response
 
 # =========================================================
 # WORKER ENTRYPOINT
 # =========================================================
 def run_pdf_ocr(job: Dict) -> Dict:
-    """
-    job:
-      {
-        "input_type": "PDF",
-        "local_path": "/path/to/file.pdf"
-      }
-    """
-
-    pipeline_start = time.perf_counter()
-
+    job_id = job["job_id"]
     pdf_path = job["local_path"]
-    pdf_name = os.path.basename(pdf_path)
-    base = os.path.splitext(pdf_name)[0]
 
-    log("============================================================")
-    log(f"Starting OCR job for PDF: {pdf_name}")
-    log(f"PDF path: {pdf_path}")
-    log(f"DPI: {DPI}")
-    log("============================================================")
+    start_time = time.perf_counter()
 
     if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        raise FileNotFoundError(pdf_path)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, f"{base}.txt")
-
-    # ---------------------------------------------------------
-    # PDF → Images
-    # ---------------------------------------------------------
-    log("Converting PDF to images")
-    start = time.perf_counter()
-    pages = convert_from_path(pdf_path, dpi=DPI)
-    log_ok(
-        f"Converted PDF to {len(pages)} image(s) "
-        f"({time.perf_counter() - start:.2f}s)"
+    out_path = os.path.join(
+        OUTPUT_DIR, f"{os.path.splitext(os.path.basename(pdf_path))[0]}.txt"
     )
 
-    # ---------------------------------------------------------
-    # OCR each page
-    # ---------------------------------------------------------
-    with open(out_path, "w", encoding="utf-8") as out:
+    pages = convert_from_path(pdf_path, dpi=DPI)
+    total_pages = len(pages)
+
+    # -----------------------------------------------------
+    # Resume support
+    # -----------------------------------------------------
+    last_done = int(
+        redis_client.hget(f"job_status:{job_id}", "current_page") or 0
+    )
+    log(f"Resuming from page {last_done + 1} / {total_pages}")
+
+    with open(out_path, "a", encoding="utf-8") as out:
         for idx, page in enumerate(pages, start=1):
-            log(f"Page {idx}/{len(pages)}: OCR started")
 
-            prompt = PROMPT_TEMPLATE.format(page=idx)
+            if idx <= last_done:
+                continue
 
-            response = gemini_ocr(prompt, page, idx)
+            # -------------------------------------------------
+            # Cancel support
+            # -------------------------------------------------
+            if redis_client.hget(f"job_status:{job_id}", "cancelled") == "true":
+                redis_client.hset(
+                    f"job_status:{job_id}",
+                    mapping={
+                        "status": "CANCELLED",
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                )
+                log("Job cancelled by user")
+                return {"status": "CANCELLED"}
+
+            response = gemini_ocr(
+                PROMPT_TEMPLATE.format(page=idx), page, idx
+            )
             text = (response.text or "").strip()
 
             if not text:
-                log_err(f"Page {idx}: Empty OCR output")
-                raise RuntimeError(f"Empty OCR output on page {idx}")
+                raise RuntimeError(f"Empty OCR output page {idx}")
 
-            out.write(f"=== Page {idx} ===\n")
-            out.write(text.lstrip())
-            out.write("\n\n")
+            out.write(f"=== Page {idx} ===\n{text}\n\n")
 
-            log_ok(f"Page {idx}: OCR text written")
+            elapsed = time.perf_counter() - start_time
+            avg_page_sec = elapsed / idx
+            eta_sec = int(avg_page_sec * (total_pages - idx))
 
-    total_time = time.perf_counter() - pipeline_start
+            # -------------------------------------------------
+            # Live progress + ETA
+            # -------------------------------------------------
+            redis_client.hset(
+                f"job_status:{job_id}",
+                mapping={
+                    "status": "PROCESSING",
+                    "current_page": idx,
+                    "total_pages": total_pages,
+                    "avg_page_sec": round(avg_page_sec, 2),
+                    "eta_sec": eta_sec,
+                    "output_path": out_path,
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            )
 
-    log("============================================================")
-    log_ok(f"OCR job completed successfully")
-    log(f"Output file: {out_path}")
-    log(f"Total pages: {len(pages)}")
-    log(f"Total time: {total_time:.2f}s")
-    log("============================================================")
+    redis_client.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "status": "COMPLETED",
+            "output_path": out_path,
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
 
-    return {
-        "status": "COMPLETED",
-        "output_path": out_path,
-        "pages": len(pages),
-        "duration_sec": round(total_time, 2),
-    }
+    return {"status": "COMPLETED", "output_path": out_path}
