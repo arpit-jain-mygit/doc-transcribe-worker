@@ -160,6 +160,7 @@ def run_worker():
                 "job_type": job.get("job_type"),
                 "input_type": job.get("input_type"),
                 "attempts": attempts,
+                "started_at": datetime.utcnow().isoformat() + "Z",
             })
             append_log(job_id, f"Processing started (attempt {attempts})")
 

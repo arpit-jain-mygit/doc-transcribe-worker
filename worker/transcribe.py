@@ -11,7 +11,7 @@ import unicodedata
 import time
 from datetime import datetime
 from typing import Dict
-
+import redis
 import yt_dlp
 from dotenv import load_dotenv
 
@@ -52,6 +52,13 @@ if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
 if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
+
+REDIS_URL = os.environ.get("REDIS_URL")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL not set")
+
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
 
 # =========================================================
 # INIT VERTEX AI (SAME AS OCR)
@@ -215,63 +222,58 @@ def transcribe_audio(mp3_path: str) -> str:
 # WORKER ENTRYPOINT
 # =========================================================
 def run_audio_transcription(job: Dict) -> Dict:
-    """
-    job:
-      {
-        "job_id": "...",
-        "job_type": "TRANSCRIBE",
-        "input_type": "YOUTUBE" | "AUDIO",
-        "url": "..."
-      }
-    """
-
     pipeline_start = time.perf_counter()
     job_id = job.get("job_id")
     url = job["url"]
 
-    log("============================================================")
-    log(f"Starting transcription job | job_id={job_id}")
-    log(f"Input URL: {url}")
-    log("============================================================")
+    # ✅ PROGRESS INIT
+    redis_client.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "status": "PROCESSING",
+            "current_page": 0,
+            "total_pages": 1,
+            "eta_sec": 0,
+        },
+    )
 
     audio = download_youtube_audio(url)
+
+    redis_client.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "current_page": 0,
+            "eta_sec": 60,
+        },
+    )
+
     text = transcribe_audio(audio["mp3_path"])
 
     out_name = f"{audio['video_id']}__{sanitize_filename(audio['title'])}.txt"
     out_path = os.path.join(TRANSCRIPTS_DIR, out_name)
 
-    log(f"Writing transcription output to {out_path}")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(text)
 
-    gcs_base = f"jobs/{job_id}"
-
-    append_log(job_id, "Uploading transcription outputs to GCS")
-
-    gcs_audio = upload_file(
-        local_path=audio["mp3_path"],
-        destination_path=f"{gcs_base}/audio.mp3",
+    # ✅ MARK 100% DONE
+    redis_client.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "current_page": 1,
+            "total_pages": 1,
+            "eta_sec": 0,
+        },
     )
 
+    gcs_base = f"jobs/{job_id}"
     gcs_transcript = upload_text(
         content=text,
         destination_path=f"{gcs_base}/transcript.txt",
     )
 
-    total_time = time.perf_counter() - pipeline_start
-
-    log("============================================================")
-    log_ok("Transcription job completed successfully")
-    log(f"Output file: {out_path}")
-    log(f"Total time: {total_time:.2f}s")
-    log("============================================================")
-
-    filename = os.path.basename(out_path)
-
     return {
         "job_id": job_id,
         "status": "COMPLETED",
         "output_path": gcs_transcript["gcs_uri"],
-        "output_filename": filename,  # ✅ ADD THIS
-        "duration_sec": round(total_time, 2),
+        "output_filename": out_name,
     }
