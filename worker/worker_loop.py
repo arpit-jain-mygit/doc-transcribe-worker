@@ -26,7 +26,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from worker.dispatcher import dispatch
-from worker.utils.gcs import append_log
+import tempfile
+import requests
+
 
 # =========================================================
 # CONFIG
@@ -145,8 +147,48 @@ def run_worker():
             job = json.loads(raw_job)
             job_id = job.get("job_id", "unknown")
 
+            # -------------------------------------------------
+            # OPTION B: GitHub → GCS → OCR
+            # -------------------------------------------------
+            if (
+                    job.get("job_type") == "OCR"
+                    and isinstance(job.get("local_path"), str)
+                    and job["local_path"].startswith("https://github.com/")
+            ):
+                github_url = job["local_path"]
+
+                # Convert blob URL → raw URL
+                if "/blob/" in github_url:
+                    github_url = github_url.replace(
+                        "https://github.com/",
+                        "https://raw.githubusercontent.com/"
+                    ).replace("/blob/", "/")
+
+                log_info("Downloading PDF from GitHub", job_id=job_id)
+
+                # 1️⃣ Download PDF
+                r = requests.get(github_url, timeout=30)
+                if r.status_code != 200:
+                    raise RuntimeError(f"Failed to download GitHub PDF: {github_url}")
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(r.content)
+                    local_pdf_path = tmp.name
+                    # Normalize job for OCR
+                    job["input_type"] = "PDF"
+                    job["local_path"] = local_pdf_path
+
+                    log_info(
+                        "GitHub PDF downloaded for OCR",
+                        job_id=job_id,
+                        local_path=local_pdf_path,
+                    )
+
+                log_info(
+                    "GitHub PDF staged to GCS",
+                    job_id=job_id,                )
+
             log_info("Job received", job_id=job_id)
-            append_log(job_id, "Job received by worker")
 
             # -------------------------------------------------
             # ATTEMPT TRACKING
@@ -159,9 +201,9 @@ def run_worker():
                 "job_type": job.get("job_type"),
                 "input_type": job.get("input_type"),
                 "attempts": attempts,
+                "status": "PROCESSING",
                 "started_at": datetime.utcnow().isoformat() + "Z",
             })
-            append_log(job_id, f"Processing started (attempt {attempts})")
 
             log_info(
                 "Job processing started",
@@ -186,7 +228,6 @@ def run_worker():
                     "output_path": output_path,
                     "output_filename": os.path.basename(output_path) if output_path else "",
                 })
-                append_log(job_id, "Job completed successfully")
 
                 redis_client.delete(attempt_key)
 
@@ -206,7 +247,6 @@ def run_worker():
                     duration_sec=round(exec_time, 2),
                     error=str(e),
                 )
-                append_log(job_id, f"Job execution failed: {str(e)}")
 
                 if attempts >= MAX_ATTEMPTS:
                     update_job_status(job_id, {
@@ -215,7 +255,6 @@ def run_worker():
                     })
 
                     push_to_dlq(job, e, attempts)
-                    append_log(job_id, f"Moved to DLQ after {attempts} attempts")
 
                     redis_client.delete(attempt_key)
 
