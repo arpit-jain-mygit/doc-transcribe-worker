@@ -20,15 +20,13 @@ from datetime import datetime
 
 import redis
 from dotenv import load_dotenv
+# =========================================================
+# LOAD ENV (MUST BE BEFORE GCS IMPORTS)
+# =========================================================
+load_dotenv()
 
 from worker.dispatcher import dispatch
 from worker.utils.gcs import append_log
-
-
-# =========================================================
-# LOAD ENV
-# =========================================================
-load_dotenv()
 
 # =========================================================
 # CONFIG
