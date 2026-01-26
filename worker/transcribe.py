@@ -20,6 +20,7 @@ from vertexai.preview.generative_models import (
     GenerativeModel,
     Part,
 )
+from worker.utils.gcs import upload_text, upload_file, append_log
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -38,9 +39,8 @@ PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
 
-CACHE_DIR = ".cache"
-AUDIO_CACHE_DIR = os.path.join(CACHE_DIR, "audio")
-TRANSCRIPTS_DIR = "transcripts"
+AUDIO_CACHE_DIR = "/tmp/audio"
+TRANSCRIPTS_DIR = "/tmp/transcripts"
 
 os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
@@ -244,6 +244,20 @@ def run_audio_transcription(job: Dict) -> Dict:
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(text)
 
+    gcs_base = f"jobs/{job_id}"
+
+    append_log(job_id, "Uploading transcription outputs to GCS")
+
+    gcs_audio = upload_file(
+        local_path=audio["mp3_path"],
+        destination_path=f"{gcs_base}/audio.mp3",
+    )
+
+    gcs_transcript = upload_text(
+        content=text,
+        destination_path=f"{gcs_base}/transcript.txt",
+    )
+
     total_time = time.perf_counter() - pipeline_start
 
     log("============================================================")
@@ -257,7 +271,7 @@ def run_audio_transcription(job: Dict) -> Dict:
     return {
         "job_id": job_id,
         "status": "COMPLETED",
-        "output_path": out_path,
+        "output_path": gcs_transcript["gcs_uri"],
         "output_filename": filename,  # ✅ ADD THIS
         "duration_sec": round(total_time, 2),
     }

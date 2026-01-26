@@ -22,6 +22,8 @@ import redis
 from dotenv import load_dotenv
 
 from worker.dispatcher import dispatch
+from worker.utils.gcs import append_log
+
 
 # =========================================================
 # LOAD ENV
@@ -146,6 +148,7 @@ def run_worker():
             job_id = job.get("job_id", "unknown")
 
             log_info("Job received", job_id=job_id)
+            append_log(job_id, "Job received by worker")
 
             # -------------------------------------------------
             # ATTEMPT TRACKING
@@ -160,6 +163,7 @@ def run_worker():
                 "input_type": job.get("input_type"),
                 "attempts": attempts,
             })
+            append_log(job_id, f"Processing started (attempt {attempts})")
 
             log_info(
                 "Job processing started",
@@ -184,6 +188,7 @@ def run_worker():
                     "output_path": output_path,
                     "output_filename": os.path.basename(output_path) if output_path else "",
                 })
+                append_log(job_id, "Job completed successfully")
 
                 redis_client.delete(attempt_key)
 
@@ -203,6 +208,7 @@ def run_worker():
                     duration_sec=round(exec_time, 2),
                     error=str(e),
                 )
+                append_log(job_id, f"Job execution failed: {str(e)}")
 
                 if attempts >= MAX_ATTEMPTS:
                     update_job_status(job_id, {
@@ -211,6 +217,8 @@ def run_worker():
                     })
 
                     push_to_dlq(job, e, attempts)
+                    append_log(job_id, f"Moved to DLQ after {attempts} attempts")
+
                     redis_client.delete(attempt_key)
 
                 else:

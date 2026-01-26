@@ -15,6 +15,7 @@ from datetime import datetime
 
 from worker.transcribe import run_audio_transcription
 from worker.ocr import run_pdf_ocr
+from worker.utils.gcs import append_log
 
 
 # =========================================================
@@ -65,6 +66,10 @@ def dispatch(job: Dict) -> Dict:
     job_id = job.get("job_id", "unknown")
     job_type = job.get("job_type", "").upper()
     input_type = job.get("input_type", "").upper()
+    append_log(
+        job_id,
+        f"Dispatcher routing job_type={job_type}, input_type={input_type}"
+    )
 
     log(f"Job ID: {job_id}")
     log(f"Job type: {job_type}, Input type: {input_type}")
@@ -78,6 +83,8 @@ def dispatch(job: Dict) -> Dict:
                 log("Routing to PDF OCR pipeline")
                 result = run_pdf_ocr(job)
                 log_ok("OCR pipeline completed")
+                append_log(job_id, "Dispatcher completed successfully")
+
                 return result
 
             raise UnsupportedJobError(
@@ -92,6 +99,8 @@ def dispatch(job: Dict) -> Dict:
                 log("Routing to audio/video transcription pipeline")
                 result = run_audio_transcription(job)
                 log_ok("Transcription pipeline completed")
+                append_log(job_id, "Dispatcher completed successfully")
+
                 return result
 
             raise UnsupportedJobError(
@@ -106,6 +115,7 @@ def dispatch(job: Dict) -> Dict:
         )
 
     except Exception as e:
+        append_log(job_id, f"Dispatcher error: {str(e)}")
         log_err(f"Dispatcher failed for job_id={job_id}: {e}")
         raise
 

@@ -21,6 +21,7 @@ from vertexai.preview.generative_models import (
     Part,
     Image as VertexImage,
 )
+from worker.utils.gcs import upload_text, append_log
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -38,7 +39,7 @@ REDIS_URL = os.environ.get("REDIS_URL")
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 DPI = 300
-OUTPUT_DIR = "output_texts"
+OUTPUT_DIR = "/tmp/output_texts"
 
 PROMPT_TEMPLATE = """
 Role: You are an expert Indic-language archivist.
@@ -174,14 +175,26 @@ def run_pdf_ocr(job: Dict) -> Dict:
                     "updated_at": datetime.utcnow().isoformat(),
                 },
             )
+    append_log(job_id, "Uploading OCR output to GCS")
+
+    gcs_base = f"jobs/{job_id}"
+
+    with open(out_path, "r", encoding="utf-8") as f:
+        gcs_out = upload_text(
+            content=f.read(),
+            destination_path=f"{gcs_base}/ocr.txt",
+        )
 
     redis_client.hset(
         f"job_status:{job_id}",
         mapping={
             "status": "COMPLETED",
-            "output_path": out_path,
+            "output_path": gcs_out["gcs_uri"],
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
-    return {"status": "COMPLETED", "output_path": out_path}
+    return {
+        "status": "COMPLETED",
+        "output_path": gcs_out["gcs_uri"]
+    }
