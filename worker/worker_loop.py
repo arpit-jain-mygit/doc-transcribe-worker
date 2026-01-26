@@ -156,7 +156,6 @@ def run_worker():
 
             update_job_status(job_id, {
                 "job_id": job_id,
-                "status": "PROCESSING",
                 "job_type": job.get("job_type"),
                 "input_type": job.get("input_type"),
                 "attempts": attempts,

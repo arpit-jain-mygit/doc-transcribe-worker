@@ -59,6 +59,18 @@ if not REDIS_URL:
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
+def update_progress(job_id: str, *, stage: str, progress: int, eta_sec: int | None = None):
+    redis_client.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "status": "PROCESSING",
+            "stage": stage,
+            "progress": progress,
+            "eta_sec": eta_sec or 0,
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+
 
 # =========================================================
 # INIT VERTEX AI (SAME AS OCR)
@@ -226,6 +238,13 @@ def run_audio_transcription(job: Dict) -> Dict:
     job_id = job.get("job_id")
     url = job["url"]
 
+    update_progress(
+        job_id,
+        stage="Starting transcription",
+        progress=0,
+        eta_sec=120,
+    )
+
     # ✅ PROGRESS INIT
     redis_client.hset(
         f"job_status:{job_id}",
@@ -237,7 +256,20 @@ def run_audio_transcription(job: Dict) -> Dict:
         },
     )
 
+    update_progress(
+        job_id,
+        stage="Downloading audio",
+        progress=15,
+        eta_sec=90,
+    )
     audio = download_youtube_audio(url)
+
+    update_progress(
+        job_id,
+        stage="Preparing audio",
+        progress=30,
+        eta_sec=75,
+    )
 
     redis_client.hset(
         f"job_status:{job_id}",
@@ -247,7 +279,24 @@ def run_audio_transcription(job: Dict) -> Dict:
         },
     )
 
+    update_progress(
+        job_id,
+        stage="Transcribing (Gemini)",
+        progress=40,
+        eta_sec=60,
+    )
+    gemini_start = time.perf_counter()
+
     text = transcribe_audio(audio["mp3_path"])
+
+    elapsed = int(time.perf_counter() - gemini_start)
+    update_progress(
+        job_id,
+        stage="Finalizing transcript",
+        progress=85,
+        eta_sec=max(10 - elapsed, 0),
+    )
+
 
     out_name = f"{audio['video_id']}__{sanitize_filename(audio['title'])}.txt"
     out_path = os.path.join(TRANSCRIPTS_DIR, out_name)
@@ -263,6 +312,13 @@ def run_audio_transcription(job: Dict) -> Dict:
             "total_pages": 1,
             "eta_sec": 0,
         },
+    )
+
+    update_progress(
+        job_id,
+        stage="Uploading output",
+        progress=95,
+        eta_sec=5,
     )
 
     gcs_base = f"jobs/{job_id}"
