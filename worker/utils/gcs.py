@@ -6,9 +6,6 @@ import json
 import base64
 from datetime import datetime
 from google.cloud import storage
-from datetime import timedelta
-import os
-
 
 # ---------------------------------------------------------
 # CONFIG
@@ -22,6 +19,11 @@ _client = None
 
 
 def _get_client():
+    """
+    Lazily initialize and cache GCS client.
+    Supports base64-encoded service account JSON via
+    GOOGLE_APPLICATION_CREDENTIALS_JSON.
+    """
     global _client
     if _client is not None:
         return _client
@@ -82,6 +84,10 @@ def upload_file(*, local_path: str, destination_path: str) -> dict:
 # APPEND WORKER LOG
 # ---------------------------------------------------------
 def append_log(job_id: str, message: str):
+    """
+    Append a single line to jobs/<job_id>/logs/worker.log in GCS.
+    Requires storage.objects.get + create permissions.
+    """
     ts = datetime.utcnow().isoformat() + "Z"
     path = f"jobs/{job_id}/logs/worker.log"
 
@@ -96,21 +102,4 @@ def append_log(job_id: str, message: str):
     blob.upload_from_string(
         existing + f"[{ts}] {message}\n",
         content_type="text/plain; charset=utf-8",
-    )
-
-def generate_signed_url(gcs_uri: str, expires_minutes: int = 15) -> str:
-    if not gcs_uri.startswith("gs://"):
-        raise ValueError("Invalid GCS URI")
-
-    _, rest = gcs_uri.split("gs://", 1)
-    bucket_name, blob_name = rest.split("/", 1)
-
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-
-    return blob.generate_signed_url(
-        version="v4",
-        expiration=timedelta(minutes=expires_minutes),
-        method="GET",
     )
