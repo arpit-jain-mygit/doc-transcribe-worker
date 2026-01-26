@@ -6,7 +6,6 @@ import json
 import base64
 from datetime import datetime
 from google.cloud import storage
-from google.cloud import storage
 from datetime import timedelta
 import os
 
