@@ -22,3 +22,5 @@ Pillow>=10.0.0
 # ------------------------------
 google-cloud-aiplatform>=1.42.0
 vertexai>=1.42.0
+
+google-cloud-storage
