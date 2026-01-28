@@ -10,10 +10,12 @@ import re
 import unicodedata
 import time
 from datetime import datetime
-from typing import Dict
+from typing import Dict, List
+
 import redis
 import yt_dlp
 from dotenv import load_dotenv
+from pydub import AudioSegment  # 🔹 ADDED
 
 from google.cloud import aiplatform
 from vertexai.preview.generative_models import (
@@ -41,6 +43,9 @@ MODEL_NAME = "gemini-2.5-flash"
 
 AUDIO_CACHE_DIR = "/tmp/audio"
 TRANSCRIPTS_DIR = "/tmp/transcripts"
+
+# 🔹 CHUNKING CONFIG (NEW, SAFE DEFAULT)
+CHUNK_DURATION_SEC = 5 * 60  # 5 minutes per chunk
 
 os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
@@ -70,7 +75,6 @@ def update_progress(job_id: str, *, stage: str, progress: int, eta_sec: int | No
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
-
 
 # =========================================================
 # INIT VERTEX AI (SAME AS OCR)
@@ -199,7 +203,7 @@ def download_youtube_audio(url: str) -> Dict:
     return {"mp3_path": mp3_path, "title": title, "video_id": video_id}
 
 # =========================================================
-# VERTEX AI TRANSCRIPTION (KEY FIX)
+# VERTEX AI TRANSCRIPTION (UNCHANGED CORE)
 # =========================================================
 def transcribe_audio(mp3_path: str) -> str:
     log(f"Sending audio to Vertex AI: {os.path.basename(mp3_path)}")
@@ -231,6 +235,22 @@ def transcribe_audio(mp3_path: str) -> str:
     return text
 
 # =========================================================
+# 🔹 CHUNK HELPERS (ADDED, NON-DESTRUCTIVE)
+# =========================================================
+def split_audio_into_chunks(mp3_path: str) -> List[str]:
+    audio = AudioSegment.from_mp3(mp3_path)
+    chunk_ms = CHUNK_DURATION_SEC * 1000
+    chunks = []
+
+    for i, start in enumerate(range(0, len(audio), chunk_ms), start=1):
+        chunk = audio[start:start + chunk_ms]
+        chunk_path = mp3_path.replace(".mp3", f"_chunk_{i}.mp3")
+        chunk.export(chunk_path, format="mp3")
+        chunks.append(chunk_path)
+
+    return chunks
+
+# =========================================================
 # WORKER ENTRYPOINT
 # =========================================================
 def run_audio_transcription(job: Dict) -> Dict:
@@ -238,92 +258,63 @@ def run_audio_transcription(job: Dict) -> Dict:
     job_id = job.get("job_id")
     url = job["url"]
 
-    update_progress(
-        job_id,
-        stage="Starting transcription",
-        progress=0,
-        eta_sec=120,
-    )
+    update_progress(job_id, stage="Starting transcription", progress=0, eta_sec=120)
 
-    # ✅ PROGRESS INIT
     redis_client.hset(
         f"job_status:{job_id}",
-        mapping={
-            "status": "PROCESSING",
-            "current_page": 0,
-            "total_pages": 1,
-            "eta_sec": 0,
-        },
+        mapping={"status": "PROCESSING", "current_page": 0, "total_pages": 1, "eta_sec": 0},
     )
 
-    update_progress(
-        job_id,
-        stage="Downloading audio",
-        progress=15,
-        eta_sec=90,
-    )
+    update_progress(job_id, stage="Downloading audio", progress=15, eta_sec=90)
     audio = download_youtube_audio(url)
 
-    update_progress(
-        job_id,
-        stage="Preparing audio",
-        progress=30,
-        eta_sec=75,
-    )
+    update_progress(job_id, stage="Preparing audio", progress=30, eta_sec=75)
+
+    # 🔹 CHUNK DECISION (AUTO)
+    chunks = split_audio_into_chunks(audio["mp3_path"])
+    total_chunks = len(chunks)
 
     redis_client.hset(
         f"job_status:{job_id}",
-        mapping={
-            "current_page": 0,
-            "eta_sec": 60,
-        },
+        mapping={"current_page": 0, "total_pages": total_chunks},
     )
 
-    update_progress(
-        job_id,
-        stage="Transcribing (Gemini)",
-        progress=40,
-        eta_sec=60,
-    )
-    gemini_start = time.perf_counter()
+    update_progress(job_id, stage="Transcribing (Gemini)", progress=40, eta_sec=60)
 
-    text = transcribe_audio(audio["mp3_path"])
+    texts: List[str] = []
 
-    elapsed = int(time.perf_counter() - gemini_start)
-    update_progress(
-        job_id,
-        stage="Finalizing transcript",
-        progress=85,
-        eta_sec=max(10 - elapsed, 0),
-    )
+    for idx, chunk_path in enumerate(chunks, start=1):
+        text = transcribe_audio(chunk_path)
+        texts.append(text)
 
+        elapsed = time.perf_counter() - pipeline_start
+        avg = elapsed / idx
+        eta = int(avg * (total_chunks - idx))
+
+        redis_client.hset(
+            f"job_status:{job_id}",
+            mapping={
+                "current_page": idx,
+                "total_pages": total_chunks,
+                "eta_sec": eta,
+            },
+        )
+
+    update_progress(job_id, stage="Finalizing transcript", progress=85, eta_sec=10)
+
+    final_text = "\n\n".join(texts)
 
     out_name = f"{audio['video_id']}__{sanitize_filename(audio['title'])}.txt"
     out_path = os.path.join(TRANSCRIPTS_DIR, out_name)
 
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(text)
+        f.write(final_text)
 
-    # ✅ MARK 100% DONE
-    redis_client.hset(
-        f"job_status:{job_id}",
-        mapping={
-            "current_page": 1,
-            "total_pages": 1,
-            "eta_sec": 0,
-        },
-    )
-
-    update_progress(
-        job_id,
-        stage="Uploading output",
-        progress=95,
-        eta_sec=5,
-    )
+    update_progress(job_id, stage="Uploading output", progress=95, eta_sec=5)
 
     gcs_base = f"jobs/{job_id}"
     gcs_transcript = upload_text(
-        content=text,
+        content=final_text,
         destination_path=f"{gcs_base}/transcript.txt",
     )
 

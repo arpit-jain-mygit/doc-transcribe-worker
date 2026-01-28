@@ -24,3 +24,4 @@ google-cloud-aiplatform>=1.42.0
 vertexai>=1.42.0
 
 google-cloud-storage
+pydub>=0.25.1
