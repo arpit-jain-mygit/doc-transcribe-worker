@@ -211,3 +211,15 @@ def run_pdf_ocr(job: Dict) -> Dict:
         "status": "COMPLETED",
         "output_path": gcs_out["gcs_uri"]
     }
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+def ocr_pdf(path: str, job: dict):
+    job_id = job["job_id"]
+    logger.info(f"OCR started: job_id={job_id}, path={path}")
+
+    # OCR logic here
+
+    logger.info(f"OCR completed: job_id={job_id}")

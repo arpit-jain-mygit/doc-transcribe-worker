@@ -103,3 +103,22 @@ def append_log(job_id: str, message: str):
         existing + f"[{ts}] {message}\n",
         content_type="text/plain; charset=utf-8",
     )
+
+from google.cloud import storage
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+client = storage.Client()
+
+def download_from_gcs(gcs_uri: str) -> str:
+    logger.info(f"GCS download started: gcs_uri={gcs_uri}")
+
+    path = gcs_uri.replace("gs://", "")
+    bucket_name, blob_path = path.split("/", 1)
+
+    local_path = f"/tmp/{os.path.basename(blob_path)}"
+    client.bucket(bucket_name).blob(blob_path).download_to_filename(local_path)
+
+    logger.info(f"GCS download completed: local_path={local_path}")
+    return local_path

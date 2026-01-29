@@ -20,6 +20,17 @@ from datetime import datetime
 
 import redis
 from dotenv import load_dotenv
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] [%(asctime)s] [WORKER] %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
 # =========================================================
 # LOAD ENV (MUST BE BEFORE GCS IMPORTS)
 # =========================================================

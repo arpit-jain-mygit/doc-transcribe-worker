@@ -1,173 +1,40 @@
-# -*- coding: utf-8 -*-
-"""
-Job Dispatcher for doc-transcribe-worker
+import logging
 
-Responsible for:
-- validating job payloads
-- routing jobs to the correct execution pipeline
-- returning normalized results
+from worker.utils.gcs import download_from_gcs
+from worker.transcribe import transcribe_file
+from worker.ocr import ocr_pdf
 
-NO execution logic lives here.
-"""
+logger = logging.getLogger(__name__)
 
-from typing import Dict
-from datetime import datetime
+def dispatch(job: dict):
+    job_id = job["job_id"]
 
-from worker.transcribe import run_audio_transcription
-from worker.ocr import run_pdf_ocr
-from worker.utils.gcs import append_log
-
-
-# =========================================================
-# Logging helpers (dispatcher-level)
-# =========================================================
-def log(msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[DISPATCHER {ts}] {msg}", flush=True)
-
-
-def log_ok(msg: str):
-    log(f"✅ {msg}")
-
-
-def log_err(msg: str):
-    log(f"❌ {msg}")
-
-
-# =========================================================
-# Exceptions
-# =========================================================
-class UnsupportedJobError(Exception):
-    pass
-
-
-# =========================================================
-# Dispatcher
-# =========================================================
-def dispatch(job: Dict) -> Dict:
-    """
-    Dispatch a job to the appropriate pipeline.
-
-    Canonical job schema:
-
-    {
-        "job_id": "uuid",
-        "job_type": "OCR" | "TRANSCRIBE",
-        "input_type": "PDF" | "YOUTUBE" | "AUDIO",
-        ...
-    }
-    """
-
-    log("Incoming job received")
-    log(f"Raw job payload: {job}")
-
-    validate_job(job)
-
-    job_id = job.get("job_id", "unknown")
-    job_type = job.get("job_type", "").upper()
-    input_type = job.get("input_type", "").upper()
-    append_log(
-        job_id,
-        f"Dispatcher routing job_type={job_type}, input_type={input_type}"
-    )
-
-    log(f"Job ID: {job_id}")
-    log(f"Job type: {job_type}, Input type: {input_type}")
+    logger.info(f"Incoming job received: job_id={job_id}")
+    logger.info(f"Job payload: {job}")
 
     try:
-        # --------------------------------------------------
-        # OCR PIPELINE
-        # --------------------------------------------------
-        if job_type == "OCR":
-            if input_type == "PDF":
-                log("Routing to PDF OCR pipeline")
-                result = run_pdf_ocr(job)
-                log_ok("OCR pipeline completed")
-                append_log(job_id, "Dispatcher completed successfully")
+        logger.info(f"Downloading input from GCS: job_id={job_id}")
+        local_path = download_from_gcs(job["gcs_uri"])
 
-                return result
-
-            raise UnsupportedJobError(
-                f"OCR does not support input_type={input_type}"
-            )
-
-        # --------------------------------------------------
-        # TRANSCRIPTION PIPELINE
-        # --------------------------------------------------
-        if job_type in ("TRANSCRIBE", "TRANSCRIPTION"):
-            if input_type in ("YOUTUBE", "VIDEO", "AUDIO"):
-                log("Routing to audio/video transcription pipeline")
-                result = run_audio_transcription(job)
-                log_ok("Transcription pipeline completed")
-                append_log(job_id, "Dispatcher completed successfully")
-
-                return result
-
-            raise UnsupportedJobError(
-                f"TRANSCRIBE does not support input_type={input_type}"
-            )
-
-        # --------------------------------------------------
-        # UNKNOWN JOB
-        # --------------------------------------------------
-        raise UnsupportedJobError(
-            f"Unsupported job_type={job_type}"
+        logger.info(
+            f"Download complete: job_id={job_id}, local_path={local_path}"
         )
 
-    except Exception as e:
-        append_log(job_id, f"Dispatcher error: {str(e)}")
-        log_err(f"Dispatcher failed for job_id={job_id}: {e}")
+        filename = job["filename"].lower()
+
+        if filename.endswith(".pdf"):
+            logger.info(f"Routing to OCR pipeline: job_id={job_id}")
+            ocr_pdf(local_path, job)
+
+        elif filename.endswith((".mp3", ".wav", ".m4a", ".mp4", ".mov")):
+            logger.info(f"Routing to transcription pipeline: job_id={job_id}")
+            transcribe_file(local_path, job)
+
+        else:
+            raise ValueError(f"Unsupported file type: {filename}")
+
+        logger.info(f"Job completed successfully: job_id={job_id}")
+
+    except Exception:
+        logger.exception(f"Job execution failed: job_id={job_id}")
         raise
-
-
-# =========================================================
-# Validation
-# =========================================================
-# =========================================================
-# Schema Validation
-# =========================================================
-def validate_job(job: Dict):
-    log("Validating job schema")
-
-    if not isinstance(job, dict):
-        raise ValueError("Job must be a dictionary")
-
-    # ---- Common fields ----
-    required_common = ["job_type", "input_type"]
-    for field in required_common:
-        if field not in job:
-            raise ValueError(f"Missing required field: {field}")
-
-    job_type = job["job_type"].upper()
-    input_type = job["input_type"].upper()
-
-    # ---- OCR Job ----
-    if job_type == "OCR":
-        if input_type != "PDF":
-            raise ValueError("OCR jobs require input_type=PDF")
-
-        if "local_path" not in job:
-            raise ValueError("OCR jobs require 'local_path'")
-
-        if not isinstance(job["local_path"], str):
-            raise ValueError("'local_path' must be a string")
-
-    # ---- Transcription Job ----
-    # ---- Transcription Job ----
-    elif job_type in ("TRANSCRIBE", "TRANSCRIPTION"):
-        if input_type not in ("VIDEO", "AUDIO", "YOUTUBE"):
-            raise ValueError(
-                "TRANSCRIBE jobs require input_type=VIDEO, AUDIO, or YOUTUBE"
-            )
-
-        if "url" not in job:
-            raise ValueError("TRANSCRIBE jobs require 'url'")
-
-        if not isinstance(job["url"], str):
-            raise ValueError("'url' must be a string")
-
-
-    else:
-        raise ValueError(f"Unsupported job_type: {job_type}")
-
-    log_ok("Job schema validation passed")

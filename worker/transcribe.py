@@ -324,3 +324,15 @@ def run_audio_transcription(job: Dict) -> Dict:
         "output_path": gcs_transcript["gcs_uri"],
         "output_filename": out_name,
     }
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+def transcribe_file(path: str, job: dict):
+    job_id = job["job_id"]
+    logger.info(f"Transcription started: job_id={job_id}, path={path}")
+
+    # Transcription logic here
+
+    logger.info(f"Transcription finished: job_id={job_id}")
