@@ -146,9 +146,22 @@ def run_pdf_ocr(job: Dict) -> Dict:
                 log("Job cancelled by user")
                 return {"status": "CANCELLED"}
 
-            response = gemini_ocr(
-                PROMPT_TEMPLATE.format(page=idx), page, idx
-            )
+            for retry in range(5):
+                try:
+                    response = gemini_ocr(
+                        PROMPT_TEMPLATE.format(page=idx), page, idx
+                    )
+                    break
+                except Exception as e:
+                    if "429" in str(e):
+                        wait = 30 * (retry + 1)
+                        log(f"Rate limited (429). Sleeping {wait}s before retrying page {idx}")
+                        time.sleep(wait)
+                        continue
+                    raise
+            else:
+                raise RuntimeError("Exceeded OCR retry attempts for page")
+
             text = (response.text or "").strip()
 
             if not text:
