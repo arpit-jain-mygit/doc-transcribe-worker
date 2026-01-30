@@ -2,6 +2,7 @@
 """
 Audio / Video Transcription Engine
 Callable worker module (Vertex AI Gemini – billing-backed)
+FILE-BASED TRANSCRIPTION (GCS → local file)
 """
 
 import os
@@ -13,16 +14,16 @@ from datetime import datetime
 from typing import Dict, List
 
 import redis
-import yt_dlp
 from dotenv import load_dotenv
-from pydub import AudioSegment  # 🔹 ADDED
+from pydub import AudioSegment
 
 from google.cloud import aiplatform
 from vertexai.preview.generative_models import (
     GenerativeModel,
     Part,
 )
-from worker.utils.gcs import upload_text, upload_file, append_log
+
+from worker.utils.gcs import upload_text, append_log
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -41,49 +42,48 @@ PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
 
-AUDIO_CACHE_DIR = "/tmp/audio"
 TRANSCRIPTS_DIR = "/tmp/transcripts"
+CHUNK_DURATION_SEC = 5 * 60  # 5 minutes
 
-# 🔹 CHUNKING CONFIG (NEW, SAFE DEFAULT)
-CHUNK_DURATION_SEC = 5 * 60  # 5 minutes per chunk
-
-os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
 
 PROMPT_FILE = os.environ.get("PROMPT_FILE")
 PROMPT_NAME = os.environ.get("PROMPT_NAME")
 
+REDIS_URL = os.environ.get("REDIS_URL")
+
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
 if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
-
-REDIS_URL = os.environ.get("REDIS_URL")
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL not set")
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-def update_progress(job_id: str, *, stage: str, progress: int, eta_sec: int | None = None):
+# =========================================================
+# REDIS PROGRESS
+# =========================================================
+def update_progress(job_id: str, *, stage: str, progress: int, eta_sec: int = 0):
     redis_client.hset(
         f"job_status:{job_id}",
         mapping={
             "status": "PROCESSING",
             "stage": stage,
             "progress": progress,
-            "eta_sec": eta_sec or 0,
+            "eta_sec": eta_sec,
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
 # =========================================================
-# INIT VERTEX AI (SAME AS OCR)
+# INIT VERTEX AI
 # =========================================================
 aiplatform.init(project=PROJECT_ID, location=LOCATION)
 model = GenerativeModel(MODEL_NAME)
 
 # =========================================================
-# LOGGING HELPERS
+# LOGGING
 # =========================================================
 def ts():
     return datetime.now().strftime("%H:%M:%S")
@@ -91,29 +91,11 @@ def ts():
 def log(msg: str):
     print(f"[TRANSCRIBE {ts()}] {msg}", flush=True)
 
-def log_ok(msg: str):
-    log(f"✅ {msg}")
-
-def log_warn(msg: str):
-    log(f"⚠️  {msg}")
-
-def log_err(msg: str):
-    log(f"❌ {msg}")
-
 # =========================================================
-# yt-dlp QUIET LOGGER
-# =========================================================
-class YTDLPQuietLogger:
-    def debug(self, msg): pass
-    def warning(self, msg): pass
-    def error(self, msg):
-        log_err(f"yt-dlp error: {msg}")
-
-# =========================================================
-# PROMPT LOADER (UNCHANGED)
+# PROMPT LOADER
 # =========================================================
 def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
-    log(f"Loading prompt '{prompt_name}' from {prompt_file}")
+    log(f"Loading prompt '{prompt_name}'")
 
     with open(prompt_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -126,15 +108,14 @@ def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
 
     prompt = content.split(start, 1)[1].split(end, 1)[0].strip()
     if not prompt:
-        raise RuntimeError(f"Prompt '{prompt_name}' is empty")
+        raise RuntimeError("Prompt is empty")
 
-    log_ok("Prompt loaded successfully")
     return prompt
 
 AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
 
 # =========================================================
-# UTILITIES
+# UTIL
 # =========================================================
 def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = unicodedata.normalize("NFKC", name)
@@ -142,72 +123,21 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = re.sub(r"\s+", "_", name).strip("_")
     return name[:max_len]
 
-def get_video_info(url: str) -> dict:
-    log("Resolving video metadata")
-    start = time.perf_counter()
+def split_audio_into_chunks(mp3_path: str) -> List[str]:
+    audio = AudioSegment.from_file(mp3_path)
+    chunk_ms = CHUNK_DURATION_SEC * 1000
 
-    with yt_dlp.YoutubeDL({
-        "quiet": True,
-        "no_warnings": True,
-        "logger": YTDLPQuietLogger(),
-    }) as ydl:
-        info = ydl.extract_info(url, download=False)
+    chunks = []
+    for i, start in enumerate(range(0, len(audio), chunk_ms), start=1):
+        chunk = audio[start:start + chunk_ms]
+        out = mp3_path.replace(".", f"_chunk_{i}.")
+        chunk.export(out, format="mp3")
+        chunks.append(out)
 
-    log_ok(
-        f"Metadata resolved: id={info.get('id')} "
-        f"({time.perf_counter() - start:.2f}s)"
-    )
-    return info
+    return chunks
 
-def download_youtube_audio(url: str) -> Dict:
-    info = get_video_info(url)
-    video_id = info["id"]
-    title = info.get("title", video_id)
-
-    mp3_path = os.path.join(AUDIO_CACHE_DIR, f"{video_id}.mp3")
-
-    if os.path.exists(mp3_path):
-        log_warn("Using cached audio")
-        return {"mp3_path": mp3_path, "title": title, "video_id": video_id}
-
-    log(f"Downloading audio for video_id={video_id}")
-    start = time.perf_counter()
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "noplaylist": True,
-        "outtmpl": os.path.join(AUDIO_CACHE_DIR, f"{video_id}.%(ext)s"),
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-        "retries": 5,
-        "fragment_retries": 5,
-        "socket_timeout": 30,
-        "quiet": True,
-        "no_warnings": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-    if not os.path.exists(mp3_path):
-        raise RuntimeError("MP3 not generated")
-
-    log_ok(
-        f"Audio downloaded successfully "
-        f"({time.perf_counter() - start:.2f}s)"
-    )
-
-    return {"mp3_path": mp3_path, "title": title, "video_id": video_id}
-
-# =========================================================
-# VERTEX AI TRANSCRIPTION (UNCHANGED CORE)
-# =========================================================
 def transcribe_audio(mp3_path: str) -> str:
-    log(f"Sending audio to Vertex AI: {os.path.basename(mp3_path)}")
-    start = time.perf_counter()
+    log(f"Gemini transcription: {os.path.basename(mp3_path)}")
 
     with open(mp3_path, "rb") as f:
         audio_bytes = f.read()
@@ -223,55 +153,23 @@ def transcribe_audio(mp3_path: str) -> str:
         },
     )
 
-    log_ok(
-        f"Vertex transcription completed "
-        f"({time.perf_counter() - start:.2f}s)"
-    )
-
     text = (response.text or "").strip()
     if not text:
-        raise RuntimeError("Empty transcription")
+        raise RuntimeError("Empty transcription output")
 
     return text
 
 # =========================================================
-# 🔹 CHUNK HELPERS (ADDED, NON-DESTRUCTIVE)
-# =========================================================
-def split_audio_into_chunks(mp3_path: str) -> List[str]:
-    audio = AudioSegment.from_mp3(mp3_path)
-    chunk_ms = CHUNK_DURATION_SEC * 1000
-    chunks = []
-
-    for i, start in enumerate(range(0, len(audio), chunk_ms), start=1):
-        chunk = audio[start:start + chunk_ms]
-        chunk_path = mp3_path.replace(".mp3", f"_chunk_{i}.mp3")
-        chunk.export(chunk_path, format="mp3")
-        chunks.append(chunk_path)
-
-    return chunks
-
-# =========================================================
-# WORKER ENTRYPOINT
+# WORKER ENTRYPOINT (FILE MODE)
 # =========================================================
 def run_audio_transcription(job: Dict) -> Dict:
-    pipeline_start = time.perf_counter()
-    job_id = job.get("job_id")
-    url = job["url"]
+    job_id = job["job_id"]
+    mp3_path = job["local_path"]
 
-    update_progress(job_id, stage="Starting transcription", progress=0, eta_sec=120)
+    log(f"Starting transcription job_id={job_id}")
+    update_progress(job_id, stage="Preparing audio", progress=5, eta_sec=120)
 
-    redis_client.hset(
-        f"job_status:{job_id}",
-        mapping={"status": "PROCESSING", "current_page": 0, "total_pages": 1, "eta_sec": 0},
-    )
-
-    update_progress(job_id, stage="Downloading audio", progress=15, eta_sec=90)
-    audio = download_youtube_audio(url)
-
-    update_progress(job_id, stage="Preparing audio", progress=30, eta_sec=75)
-
-    # 🔹 CHUNK DECISION (AUTO)
-    chunks = split_audio_into_chunks(audio["mp3_path"])
+    chunks = split_audio_into_chunks(mp3_path)
     total_chunks = len(chunks)
 
     redis_client.hset(
@@ -279,15 +177,20 @@ def run_audio_transcription(job: Dict) -> Dict:
         mapping={"current_page": 0, "total_pages": total_chunks},
     )
 
-    update_progress(job_id, stage="Transcribing (Gemini)", progress=40, eta_sec=60)
-
     texts: List[str] = []
+    start = time.perf_counter()
 
-    for idx, chunk_path in enumerate(chunks, start=1):
-        text = transcribe_audio(chunk_path)
+    for idx, chunk in enumerate(chunks, start=1):
+        update_progress(
+            job_id,
+            stage=f"Transcribing chunk {idx}/{total_chunks}",
+            progress=int((idx / total_chunks) * 80),
+        )
+
+        text = transcribe_audio(chunk)
         texts.append(text)
 
-        elapsed = time.perf_counter() - pipeline_start
+        elapsed = time.perf_counter() - start
         avg = elapsed / idx
         eta = int(avg * (total_chunks - idx))
 
@@ -295,44 +198,41 @@ def run_audio_transcription(job: Dict) -> Dict:
             f"job_status:{job_id}",
             mapping={
                 "current_page": idx,
-                "total_pages": total_chunks,
                 "eta_sec": eta,
             },
         )
 
-    update_progress(job_id, stage="Finalizing transcript", progress=85, eta_sec=10)
+    update_progress(job_id, stage="Finalizing transcript", progress=90)
 
     final_text = "\n\n".join(texts)
 
-    out_name = f"{audio['video_id']}__{sanitize_filename(audio['title'])}.txt"
-    out_path = os.path.join(TRANSCRIPTS_DIR, out_name)
+    base = sanitize_filename(os.path.basename(mp3_path))
+    out_path = os.path.join(TRANSCRIPTS_DIR, f"{base}.txt")
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(final_text)
 
-    update_progress(job_id, stage="Uploading output", progress=95, eta_sec=5)
+    append_log(job_id, "Uploading transcript to GCS")
 
-    gcs_base = f"jobs/{job_id}"
-    gcs_transcript = upload_text(
+    gcs_out = upload_text(
         content=final_text,
-        destination_path=f"{gcs_base}/transcript.txt",
+        destination_path=f"jobs/{job_id}/transcript.txt",
     )
+
+    redis_client.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "status": "COMPLETED",
+            "progress": 100,
+            "output_uri": gcs_out["gcs_uri"],
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+
+    log(f"Job completed job_id={job_id}")
 
     return {
         "job_id": job_id,
         "status": "COMPLETED",
-        "output_path": gcs_transcript["gcs_uri"],
-        "output_filename": out_name,
+        "output_path": gcs_out["gcs_uri"],
     }
-
-import logging
-
-logger = logging.getLogger(__name__)
-
-def transcribe_file(path: str, job: dict):
-    job_id = job["job_id"]
-    logger.info(f"Transcription started: job_id={job_id}, path={path}")
-
-    # Transcription logic here
-
-    logger.info(f"Transcription finished: job_id={job_id}")
