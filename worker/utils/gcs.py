@@ -4,8 +4,9 @@
 import os
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from google.cloud import storage
+import logging
 
 # ---------------------------------------------------------
 # CONFIG
@@ -16,6 +17,7 @@ if not GCS_BUCKET:
     raise RuntimeError("GCS_BUCKET_NAME env var not set")
 
 _client = None
+logger = logging.getLogger(__name__)
 
 
 def _get_client():
@@ -39,6 +41,20 @@ def _get_client():
 
 
 # ---------------------------------------------------------
+# INTERNAL: SIGNED URL
+# ---------------------------------------------------------
+def _signed_url(blob, expires_days: int = 7) -> str:
+    """
+    Generate browser-downloadable HTTPS URL.
+    """
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=timedelta(days=expires_days),
+        method="GET",
+    )
+
+
+# ---------------------------------------------------------
 # UPLOAD TEXT
 # ---------------------------------------------------------
 def upload_text(
@@ -56,8 +72,11 @@ def upload_text(
         content_type=content_type,
     )
 
+    signed_url = _signed_url(blob)
+
     return {
         "gcs_uri": f"gs://{GCS_BUCKET}/{destination_path}",
+        "signed_url": signed_url,          # ✅ ADDITION
         "bucket": GCS_BUCKET,
         "blob": destination_path,
     }
@@ -73,8 +92,11 @@ def upload_file(*, local_path: str, destination_path: str) -> dict:
 
     blob.upload_from_filename(local_path)
 
+    signed_url = _signed_url(blob)
+
     return {
         "gcs_uri": f"gs://{GCS_BUCKET}/{destination_path}",
+        "signed_url": signed_url,          # ✅ ADDITION
         "bucket": GCS_BUCKET,
         "blob": destination_path,
     }
@@ -104,11 +126,10 @@ def append_log(job_id: str, message: str):
         content_type="text/plain; charset=utf-8",
     )
 
-from google.cloud import storage
-import logging
-import os
 
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------
+# DOWNLOAD FROM GCS (LOCAL)
+# ---------------------------------------------------------
 client = storage.Client()
 
 def download_from_gcs(gcs_uri: str) -> str:

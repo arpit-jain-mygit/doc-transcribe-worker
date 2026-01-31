@@ -1,29 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Audio / Video Transcription Engine
-Callable worker module (Vertex AI Gemini – billing-backed)
-FILE-BASED TRANSCRIPTION (GCS → local file)
+REAL AUDIO TRANSCRIPTION (Gemini ASR)
+WITH VERBOSE LOGGING + GCS OUTPUT
 """
 
 import os
 import sys
 import re
 import unicodedata
-import time
-from datetime import datetime
-from typing import Dict, List
+from typing import List
 
-import redis
 from dotenv import load_dotenv
 from pydub import AudioSegment
 
 from google.cloud import aiplatform
-from vertexai.preview.generative_models import (
-    GenerativeModel,
-    Part,
-)
-
-from worker.utils.gcs import upload_text, append_log
+from vertexai.preview.generative_models import GenerativeModel, Part
+from worker.utils.gcs import download_from_gcs
+import os
+import redis
+import time
+from datetime import datetime
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -38,34 +34,73 @@ load_dotenv()
 # =========================================================
 # CONFIG
 # =========================================================
-PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
 
-TRANSCRIPTS_DIR = "/tmp/transcripts"
-CHUNK_DURATION_SEC = 5 * 60  # 5 minutes
+PROMPT_FILE = os.getenv("PROMPT_FILE")
+PROMPT_NAME = os.getenv("PROMPT_NAME")
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+CHUNK_DURATION_SEC = 5 * 60  # 5 min
+TRANSCRIPTS_DIR = "output_texts"
 
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
-
-PROMPT_FILE = os.environ.get("PROMPT_FILE")
-PROMPT_NAME = os.environ.get("PROMPT_NAME")
-
-REDIS_URL = os.environ.get("REDIS_URL")
 
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
 if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
-if not REDIS_URL:
-    raise RuntimeError("REDIS_URL not set")
-
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # =========================================================
-# REDIS PROGRESS
+# REDIS
 # =========================================================
-def update_progress(job_id: str, *, stage: str, progress: int, eta_sec: int = 0):
-    redis_client.hset(
+r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+# =========================================================
+# INIT VERTEX
+# =========================================================
+aiplatform.init(project=PROJECT_ID, location=LOCATION)
+model = GenerativeModel(MODEL_NAME)
+
+# =========================================================
+# LOGGING
+# =========================================================
+def log(msg: str):
+    print(f"[TRANSCRIBE {datetime.utcnow().isoformat()}] {msg}", flush=True)
+
+# =========================================================
+# PROMPT
+# =========================================================
+def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
+    log(f"Loading prompt '{prompt_name}'")
+    with open(prompt_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    start = f"### PROMPT: {prompt_name}"
+    end = "=== END PROMPT ==="
+
+    if start not in content:
+        raise RuntimeError(f"Prompt '{prompt_name}' not found")
+
+    return content.split(start, 1)[1].split(end, 1)[0].strip()
+
+
+AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
+
+# =========================================================
+# UTILS
+# =========================================================
+def sanitize_filename(name: str, max_len: int = 180) -> str:
+    name = unicodedata.normalize("NFKC", name)
+    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
+    name = re.sub(r"\s+", "_", name).strip("_")
+    return name[:max_len]
+
+
+def update(job_id: str, *, stage: str, progress: int, eta_sec: int = 0):
+    r.hset(
         f"job_status:{job_id}",
         mapping={
             "status": "PROCESSING",
@@ -76,72 +111,32 @@ def update_progress(job_id: str, *, stage: str, progress: int, eta_sec: int = 0)
         },
     )
 
-# =========================================================
-# INIT VERTEX AI
-# =========================================================
-aiplatform.init(project=PROJECT_ID, location=LOCATION)
-model = GenerativeModel(MODEL_NAME)
 
-# =========================================================
-# LOGGING
-# =========================================================
-def ts():
-    return datetime.now().strftime("%H:%M:%S")
-
-def log(msg: str):
-    print(f"[TRANSCRIBE {ts()}] {msg}", flush=True)
-
-# =========================================================
-# PROMPT LOADER
-# =========================================================
-def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
-    log(f"Loading prompt '{prompt_name}'")
-
-    with open(prompt_file, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    start = f"### PROMPT: {prompt_name}"
-    end = "=== END PROMPT ==="
-
-    if start not in content:
-        raise RuntimeError(f"Prompt '{prompt_name}' not found")
-
-    prompt = content.split(start, 1)[1].split(end, 1)[0].strip()
-    if not prompt:
-        raise RuntimeError("Prompt is empty")
-
-    return prompt
-
-AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
-
-# =========================================================
-# UTIL
-# =========================================================
-def sanitize_filename(name: str, max_len: int = 180) -> str:
-    name = unicodedata.normalize("NFKC", name)
-    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
-    name = re.sub(r"\s+", "_", name).strip("_")
-    return name[:max_len]
-
-def split_audio_into_chunks(mp3_path: str) -> List[str]:
+def split_audio(mp3_path: str) -> List[str]:
     audio = AudioSegment.from_file(mp3_path)
+    duration_sec = int(len(audio) / 1000)
+
+    log(f"Audio duration: {duration_sec}s (~{duration_sec // 60} min)")
     chunk_ms = CHUNK_DURATION_SEC * 1000
 
     chunks = []
     for i, start in enumerate(range(0, len(audio), chunk_ms), start=1):
-        chunk = audio[start:start + chunk_ms]
-        out = mp3_path.replace(".", f"_chunk_{i}.")
-        chunk.export(out, format="mp3")
+        out = mp3_path.replace(".mp3", f"_chunk_{i}.mp3")
+        audio[start:start + chunk_ms].export(out, format="mp3")
+        log(f"Created chunk {i}: {os.path.basename(out)}")
         chunks.append(out)
 
+    log(f"Total chunks created: {len(chunks)}")
     return chunks
 
-def transcribe_audio(mp3_path: str) -> str:
-    log(f"Gemini transcription: {os.path.basename(mp3_path)}")
+
+def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
+    log(f"Starting Gemini ASR for chunk {idx}/{total}")
 
     with open(mp3_path, "rb") as f:
         audio_bytes = f.read()
 
+    t0 = time.perf_counter()
     response = model.generate_content(
         [
             Part.from_text(AUDIO_PROMPT),
@@ -152,6 +147,9 @@ def transcribe_audio(mp3_path: str) -> str:
             "max_output_tokens": 8192,
         },
     )
+    dt = round(time.perf_counter() - t0, 2)
+
+    log(f"Gemini completed chunk {idx}/{total} in {dt}s")
 
     text = (response.text or "").strip()
     if not text:
@@ -160,79 +158,15 @@ def transcribe_audio(mp3_path: str) -> str:
     return text
 
 # =========================================================
-# WORKER ENTRYPOINT (FILE MODE)
+# WORKER ENTRYPOINT
 # =========================================================
-def run_audio_transcription(job: Dict) -> Dict:
-    job_id = job["job_id"]
-    mp3_path = job["local_path"]
+def run_transcription(job_id: str, job: dict) -> dict:
+    input_gcs_uri = job["input_gcs_uri"]
 
-    log(f"Starting transcription job_id={job_id}")
-    update_progress(job_id, stage="Preparing audio", progress=5, eta_sec=120)
+    # ----------------------------
+    # DOWNLOAD FROM GCS (CRITICAL)
+    # ----------------------------
+    input_path = download_from_gcs(input_gcs_uri)
 
-    chunks = split_audio_into_chunks(mp3_path)
-    total_chunks = len(chunks)
-
-    redis_client.hset(
-        f"job_status:{job_id}",
-        mapping={"current_page": 0, "total_pages": total_chunks},
-    )
-
-    texts: List[str] = []
-    start = time.perf_counter()
-
-    for idx, chunk in enumerate(chunks, start=1):
-        update_progress(
-            job_id,
-            stage=f"Transcribing chunk {idx}/{total_chunks}",
-            progress=int((idx / total_chunks) * 80),
-        )
-
-        text = transcribe_audio(chunk)
-        texts.append(text)
-
-        elapsed = time.perf_counter() - start
-        avg = elapsed / idx
-        eta = int(avg * (total_chunks - idx))
-
-        redis_client.hset(
-            f"job_status:{job_id}",
-            mapping={
-                "current_page": idx,
-                "eta_sec": eta,
-            },
-        )
-
-    update_progress(job_id, stage="Finalizing transcript", progress=90)
-
-    final_text = "\n\n".join(texts)
-
-    base = sanitize_filename(os.path.basename(mp3_path))
-    out_path = os.path.join(TRANSCRIPTS_DIR, f"{base}.txt")
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(final_text)
-
-    append_log(job_id, "Uploading transcript to GCS")
-
-    gcs_out = upload_text(
-        content=final_text,
-        destination_path=f"jobs/{job_id}/transcript.txt",
-    )
-
-    redis_client.hset(
-        f"job_status:{job_id}",
-        mapping={
-            "status": "COMPLETED",
-            "progress": 100,
-            "output_uri": gcs_out["gcs_uri"],
-            "updated_at": datetime.utcnow().isoformat(),
-        },
-    )
-
-    log(f"Job completed job_id={job_id}")
-
-    return {
-        "job_id": job_id,
-        "status": "COMPLETED",
-        "output_path": gcs_out["gcs_uri"],
-    }
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(input_path)

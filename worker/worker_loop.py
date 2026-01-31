@@ -19,7 +19,7 @@ logger = logging.getLogger("worker")
 # =========================================================
 # REDIS INIT
 # =========================================================
-REDIS_URL = os.environ.get("REDIS_URL")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL not set")
 
@@ -54,7 +54,7 @@ while True:
 
         job = json.loads(job_raw)
         job_id = job.get("job_id", "UNKNOWN")
-        key = f"job:{job_id}"
+        key = f"job_status:{job_id}"
 
         logger.info(f"Job payload: {job}")
 
@@ -64,8 +64,8 @@ while True:
         r.hset(
             key,
             mapping={
-                "status": "processing",
-                "progress": 0,
+                "status": "PROCESSING",
+                "progress": 1,
                 "updated_at": datetime.utcnow().isoformat(),
             },
         )
@@ -84,12 +84,13 @@ while True:
         # ---------------------------------------------
         # Mark success
         # ---------------------------------------------
+        # 🔧 FIX: DO NOT overwrite output written by worker modules
         r.hset(
             key,
             mapping={
-                "status": "completed",
+                "status": "COMPLETED",
                 "progress": 100,
-                "output_uri": output.get("output_path") if isinstance(output, dict) else "",
+                # ❌ REMOVED: output_uri overwrite (this was the bug)
                 "updated_at": datetime.utcnow().isoformat(),
                 "duration_sec": duration,
             },
