@@ -24,6 +24,7 @@ if not REDIS_URL:
     raise RuntimeError("REDIS_URL not set")
 
 logger.info("Starting worker")
+logger.info(f"REDIS_URL={REDIS_URL}")
 logger.info("Connecting to Redis")
 
 try:
@@ -47,20 +48,25 @@ while True:
         logger.info("Waiting for job (BRPOP)...")
 
         start_wait = time.time()
-        _, job_raw = r.brpop(QUEUE_NAME)
+        queue, job_raw = r.brpop(QUEUE_NAME)
         wait_time = round(time.time() - start_wait, 2)
 
+        logger.info(f"BRPOP returned from queue={queue}")
         logger.info(f"Job received after {wait_time}s")
+        logger.debug(f"Raw job payload={job_raw}")
 
         job = json.loads(job_raw)
         job_id = job.get("job_id", "UNKNOWN")
         key = f"job_status:{job_id}"
 
-        logger.info(f"Job payload: {job}")
+        logger.info(f"Parsed job_id={job_id}")
+        logger.info(f"Job payload keys={list(job.keys())}")
 
         # ---------------------------------------------
         # Mark job as processing
         # ---------------------------------------------
+        logger.info(f"Marking job {job_id} as PROCESSING in Redis")
+
         r.hset(
             key,
             mapping={
@@ -75,22 +81,24 @@ while True:
         # ---------------------------------------------
         # Dispatch
         # ---------------------------------------------
-        logger.info(f"Dispatching job {job_id}")
+        logger.info(f"Dispatching job {job_id} → dispatcher.dispatch()")
 
         output = dispatch(job)
+
+        logger.info(f"Dispatch returned: {output}")
 
         duration = round(time.time() - job_start, 2)
 
         # ---------------------------------------------
         # Mark success
         # ---------------------------------------------
-        # 🔧 FIX: DO NOT overwrite output written by worker modules
+        logger.info(f"Finalizing job {job_id} in Redis")
+
         r.hset(
             key,
             mapping={
                 "status": "COMPLETED",
                 "progress": 100,
-                # ❌ REMOVED: output_uri overwrite (this was the bug)
                 "updated_at": datetime.utcnow().isoformat(),
                 "duration_sec": duration,
             },
@@ -106,10 +114,11 @@ while True:
 
         try:
             if "job_id" in locals():
+                logger.error(f"Marking job {job_id} as FAILED")
                 r.hset(
                     key,
                     mapping={
-                        "status": "failed",
+                        "status": "FAILED",
                         "error": str(e),
                         "updated_at": datetime.utcnow().isoformat(),
                     },
@@ -119,5 +128,4 @@ while True:
         except Exception:
             logger.exception("Failed while handling job failure")
 
-        # Prevent tight crash loops
         time.sleep(2)

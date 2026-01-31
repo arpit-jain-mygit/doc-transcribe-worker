@@ -151,51 +151,87 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 # =========================================================
 # ENTRYPOINT
 # =========================================================
-def run_transcription(job_id: str, job: dict) -> str:
-    input_path = job["local_path"]
+def run_transcription(job_id: str, job: dict) -> dict:
+    # -------------------------------------------------
+    # 1. Resolve input audio (GCS → local)
+    # -------------------------------------------------
+    if "input_gcs_uri" not in job:
+        raise RuntimeError("input_gcs_uri missing in job payload")
 
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(input_path)
+    input_gcs_uri = job["input_gcs_uri"]
+    filename = job.get("filename", "input.mp3")
 
-    log(f"Starting transcription job_id={job_id}")
-    update(job_id, stage="Preparing audio", progress=5)
+    from worker.utils.gcs import download_from_gcs
 
-    chunks = split_audio(input_path)
-    texts = []
+    local_input_path = download_from_gcs(input_gcs_uri)
+
+    if not os.path.exists(local_input_path):
+        raise FileNotFoundError(local_input_path)
+
+    log(f"Using local input: {local_input_path}")
+
+    # -------------------------------------------------
+    # 2. Transcription (UNCHANGED LOGIC)
+    # -------------------------------------------------
+    update(job_id, stage="Preparing audio", progress=5, eta_sec=300)
+
+    chunks = split_audio(local_input_path)
+    total = len(chunks)
+
+    texts: List[str] = []
+    start = time.perf_counter()
 
     for idx, chunk in enumerate(chunks, start=1):
         update(
             job_id,
-            stage=f"Transcribing {idx}/{len(chunks)}",
-            progress=10 + int((idx / len(chunks)) * 80),
+            stage=f"Transcribing chunk {idx}/{total}",
+            progress=10 + int((idx / total) * 80),
         )
-        texts.append(transcribe_chunk(chunk, idx, len(chunks)))
 
+        text = transcribe_chunk(chunk, idx, total)
+        texts.append(text)
+
+        elapsed = time.perf_counter() - start
+        avg = elapsed / idx
+        eta = int(avg * (total - idx))
+
+        r.hset(
+            f"job_status:{job_id}",
+            mapping={
+                "eta_sec": eta,
+                "current_page": idx,
+                "total_pages": total,
+            },
+        )
+
+    # -------------------------------------------------
+    # 3. Save + Upload output
+    # -------------------------------------------------
     final_text = "\n\n".join(texts)
 
-    base = sanitize_filename(os.path.basename(input_path))
-    local_out = os.path.join(TRANSCRIPTS_DIR, f"{base}.txt")
+    from worker.utils.gcs import upload_text
 
-    with open(local_out, "w", encoding="utf-8") as f:
-        f.write(final_text)
-
-    gcs = upload_text(
+    gcs_result = upload_text(
         content=final_text,
         destination_path=f"jobs/{job_id}/transcript.txt",
     )
 
-    # ✅ STORE BUCKET + BLOB (NOT URL)
+    gcs_uri = gcs_result["gcs_uri"]
+
+    # -------------------------------------------------
+    # 4. FINAL REDIS STATE (THIS POWERS DOWNLOAD BUTTON)
+    # -------------------------------------------------
     r.hset(
         f"job_status:{job_id}",
         mapping={
             "status": "COMPLETED",
             "stage": "Completed",
             "progress": 100,
-            "output_bucket": gcs["bucket"],
-            "output_blob": gcs["blob"],
+            "output_path": gcs_uri,
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
-    log("Transcription completed")
-    return local_out
+    log(f"Job completed → {gcs_uri}")
+
+    return {"output_path": gcs_uri}
