@@ -7,19 +7,19 @@ WITH VERBOSE LOGGING + GCS OUTPUT
 import os
 import sys
 import re
+import time
 import unicodedata
+from datetime import datetime
 from typing import List
 
+import redis
 from dotenv import load_dotenv
 from pydub import AudioSegment
 
 from google.cloud import aiplatform
 from vertexai.preview.generative_models import GenerativeModel, Part
-from worker.utils.gcs import download_from_gcs
-import os
-import redis
-import time
-from datetime import datetime
+
+from worker.utils.gcs import upload_text
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -43,7 +43,7 @@ PROMPT_NAME = os.getenv("PROMPT_NAME")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-CHUNK_DURATION_SEC = 5 * 60  # 5 min
+CHUNK_DURATION_SEC = 5 * 60
 TRANSCRIPTS_DIR = "output_texts"
 
 os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
@@ -115,41 +115,32 @@ def update(job_id: str, *, stage: str, progress: int, eta_sec: int = 0):
 def split_audio(mp3_path: str) -> List[str]:
     audio = AudioSegment.from_file(mp3_path)
     duration_sec = int(len(audio) / 1000)
+    log(f"Audio duration: {duration_sec}s")
 
-    log(f"Audio duration: {duration_sec}s (~{duration_sec // 60} min)")
     chunk_ms = CHUNK_DURATION_SEC * 1000
-
     chunks = []
+
     for i, start in enumerate(range(0, len(audio), chunk_ms), start=1):
         out = mp3_path.replace(".mp3", f"_chunk_{i}.mp3")
         audio[start:start + chunk_ms].export(out, format="mp3")
         log(f"Created chunk {i}: {os.path.basename(out)}")
         chunks.append(out)
 
-    log(f"Total chunks created: {len(chunks)}")
     return chunks
 
 
 def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
-    log(f"Starting Gemini ASR for chunk {idx}/{total}")
-
+    log(f"Gemini ASR chunk {idx}/{total}")
     with open(mp3_path, "rb") as f:
         audio_bytes = f.read()
 
-    t0 = time.perf_counter()
     response = model.generate_content(
         [
             Part.from_text(AUDIO_PROMPT),
             Part.from_data(audio_bytes, mime_type="audio/mpeg"),
         ],
-        generation_config={
-            "temperature": 0,
-            "max_output_tokens": 8192,
-        },
+        generation_config={"temperature": 0, "max_output_tokens": 8192},
     )
-    dt = round(time.perf_counter() - t0, 2)
-
-    log(f"Gemini completed chunk {idx}/{total} in {dt}s")
 
     text = (response.text or "").strip()
     if not text:
@@ -158,15 +149,53 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
     return text
 
 # =========================================================
-# WORKER ENTRYPOINT
+# ENTRYPOINT
 # =========================================================
-def run_transcription(job_id: str, job: dict) -> dict:
-    input_gcs_uri = job["input_gcs_uri"]
-
-    # ----------------------------
-    # DOWNLOAD FROM GCS (CRITICAL)
-    # ----------------------------
-    input_path = download_from_gcs(input_gcs_uri)
+def run_transcription(job_id: str, job: dict) -> str:
+    input_path = job["local_path"]
 
     if not os.path.exists(input_path):
         raise FileNotFoundError(input_path)
+
+    log(f"Starting transcription job_id={job_id}")
+    update(job_id, stage="Preparing audio", progress=5)
+
+    chunks = split_audio(input_path)
+    texts = []
+
+    for idx, chunk in enumerate(chunks, start=1):
+        update(
+            job_id,
+            stage=f"Transcribing {idx}/{len(chunks)}",
+            progress=10 + int((idx / len(chunks)) * 80),
+        )
+        texts.append(transcribe_chunk(chunk, idx, len(chunks)))
+
+    final_text = "\n\n".join(texts)
+
+    base = sanitize_filename(os.path.basename(input_path))
+    local_out = os.path.join(TRANSCRIPTS_DIR, f"{base}.txt")
+
+    with open(local_out, "w", encoding="utf-8") as f:
+        f.write(final_text)
+
+    gcs = upload_text(
+        content=final_text,
+        destination_path=f"jobs/{job_id}/transcript.txt",
+    )
+
+    # ✅ STORE BUCKET + BLOB (NOT URL)
+    r.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "status": "COMPLETED",
+            "stage": "Completed",
+            "progress": 100,
+            "output_bucket": gcs["bucket"],
+            "output_blob": gcs["blob"],
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+
+    log("Transcription completed")
+    return local_out
