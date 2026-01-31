@@ -55,6 +55,21 @@ def _signed_url(blob, expires_days: int = 7) -> str:
 
 
 # ---------------------------------------------------------
+# ✅ PUBLIC SIGNED URL (FIXES IMPORT ERROR)
+# ---------------------------------------------------------
+def generate_signed_url(
+    bucket_name: str,
+    blob_path: str,
+    expires_days: int = 7,
+) -> str:
+    client = _get_client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+
+    return _signed_url(blob, expires_days=expires_days)
+
+
+# ---------------------------------------------------------
 # UPLOAD TEXT
 # ---------------------------------------------------------
 def upload_text(
@@ -76,7 +91,7 @@ def upload_text(
 
     return {
         "gcs_uri": f"gs://{GCS_BUCKET}/{destination_path}",
-        "signed_url": signed_url,          # ✅ ADDITION
+        "signed_url": signed_url,
         "bucket": GCS_BUCKET,
         "blob": destination_path,
     }
@@ -96,7 +111,7 @@ def upload_file(*, local_path: str, destination_path: str) -> dict:
 
     return {
         "gcs_uri": f"gs://{GCS_BUCKET}/{destination_path}",
-        "signed_url": signed_url,          # ✅ ADDITION
+        "signed_url": signed_url,
         "bucket": GCS_BUCKET,
         "blob": destination_path,
     }
@@ -106,10 +121,6 @@ def upload_file(*, local_path: str, destination_path: str) -> dict:
 # APPEND WORKER LOG
 # ---------------------------------------------------------
 def append_log(job_id: str, message: str):
-    """
-    Append a single line to jobs/<job_id>/logs/worker.log in GCS.
-    Requires storage.objects.get + create permissions.
-    """
     ts = datetime.utcnow().isoformat() + "Z"
     path = f"jobs/{job_id}/logs/worker.log"
 

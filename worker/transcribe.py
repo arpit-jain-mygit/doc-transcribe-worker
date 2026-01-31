@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 REAL AUDIO TRANSCRIPTION (Gemini ASR)
-WITH VERBOSE LOGGING + GCS OUTPUT
+WITH VERBOSE LOGGING + GCS OUTPUT + SIGNED DOWNLOAD URL
 """
 
 import os
@@ -19,7 +19,7 @@ from pydub import AudioSegment
 from google.cloud import aiplatform
 from vertexai.preview.generative_models import GenerativeModel, Part
 
-from worker.utils.gcs import upload_text
+from worker.utils.gcs import upload_text, download_from_gcs, generate_signed_url
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -43,10 +43,7 @@ PROMPT_NAME = os.getenv("PROMPT_NAME")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-CHUNK_DURATION_SEC = 5 * 60
-TRANSCRIPTS_DIR = "output_texts"
-
-os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+CHUNK_DURATION_SEC = 5 * 60  # 5 min
 
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
@@ -74,7 +71,6 @@ def log(msg: str):
 # PROMPT
 # =========================================================
 def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
-    log(f"Loading prompt '{prompt_name}'")
     with open(prompt_file, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -85,7 +81,6 @@ def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
         raise RuntimeError(f"Prompt '{prompt_name}' not found")
 
     return content.split(start, 1)[1].split(end, 1)[0].strip()
-
 
 AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
 
@@ -98,20 +93,20 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = re.sub(r"\s+", "_", name).strip("_")
     return name[:max_len]
 
-
-def update(job_id: str, *, stage: str, progress: int, eta_sec: int = 0):
+def update(job_id: str, *, stage: str, progress: int):
     r.hset(
         f"job_status:{job_id}",
         mapping={
             "status": "PROCESSING",
             "stage": stage,
             "progress": progress,
-            "eta_sec": eta_sec,
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
-
+# =========================================================
+# AUDIO SPLIT
+# =========================================================
 def split_audio(mp3_path: str) -> List[str]:
     audio = AudioSegment.from_file(mp3_path)
     duration_sec = int(len(audio) / 1000)
@@ -126,14 +121,19 @@ def split_audio(mp3_path: str) -> List[str]:
         log(f"Created chunk {i}: {os.path.basename(out)}")
         chunks.append(out)
 
+    log(f"Total chunks: {len(chunks)}")
     return chunks
 
-
+# =========================================================
+# GEMINI ASR
+# =========================================================
 def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
     log(f"Gemini ASR chunk {idx}/{total}")
+
     with open(mp3_path, "rb") as f:
         audio_bytes = f.read()
 
+    t0 = time.perf_counter()
     response = model.generate_content(
         [
             Part.from_text(AUDIO_PROMPT),
@@ -141,6 +141,8 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
         ],
         generation_config={"temperature": 0, "max_output_tokens": 8192},
     )
+
+    log(f"Chunk {idx} completed in {round(time.perf_counter() - t0, 2)}s")
 
     text = (response.text or "").strip()
     if not text:
@@ -152,34 +154,29 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 # ENTRYPOINT
 # =========================================================
 def run_transcription(job_id: str, job: dict) -> dict:
-    # -------------------------------------------------
-    # 1. Resolve input audio (GCS → local)
-    # -------------------------------------------------
+    # ---------------------------------------------
+    # 1. Download input from GCS
+    # ---------------------------------------------
     if "input_gcs_uri" not in job:
         raise RuntimeError("input_gcs_uri missing in job payload")
 
     input_gcs_uri = job["input_gcs_uri"]
-    filename = job.get("filename", "input.mp3")
+    local_input = download_from_gcs(input_gcs_uri)
 
-    from worker.utils.gcs import download_from_gcs
+    if not os.path.exists(local_input):
+        raise FileNotFoundError(local_input)
 
-    local_input_path = download_from_gcs(input_gcs_uri)
+    log(f"Using local input: {local_input}")
 
-    if not os.path.exists(local_input_path):
-        raise FileNotFoundError(local_input_path)
+    # ---------------------------------------------
+    # 2. Transcription
+    # ---------------------------------------------
+    update(job_id, stage="Preparing audio", progress=5)
 
-    log(f"Using local input: {local_input_path}")
-
-    # -------------------------------------------------
-    # 2. Transcription (UNCHANGED LOGIC)
-    # -------------------------------------------------
-    update(job_id, stage="Preparing audio", progress=5, eta_sec=300)
-
-    chunks = split_audio(local_input_path)
+    chunks = split_audio(local_input)
     total = len(chunks)
 
     texts: List[str] = []
-    start = time.perf_counter()
 
     for idx, chunk in enumerate(chunks, start=1):
         update(
@@ -187,51 +184,44 @@ def run_transcription(job_id: str, job: dict) -> dict:
             stage=f"Transcribing chunk {idx}/{total}",
             progress=10 + int((idx / total) * 80),
         )
+        texts.append(transcribe_chunk(chunk, idx, total))
 
-        text = transcribe_chunk(chunk, idx, total)
-        texts.append(text)
-
-        elapsed = time.perf_counter() - start
-        avg = elapsed / idx
-        eta = int(avg * (total - idx))
-
-        r.hset(
-            f"job_status:{job_id}",
-            mapping={
-                "eta_sec": eta,
-                "current_page": idx,
-                "total_pages": total,
-            },
-        )
-
-    # -------------------------------------------------
-    # 3. Save + Upload output
-    # -------------------------------------------------
+    # ---------------------------------------------
+    # 3. Upload transcript to GCS
+    # ---------------------------------------------
     final_text = "\n\n".join(texts)
 
-    from worker.utils.gcs import upload_text
-
-    gcs_result = upload_text(
+    upload = upload_text(
         content=final_text,
         destination_path=f"jobs/{job_id}/transcript.txt",
     )
 
-    gcs_uri = gcs_result["gcs_uri"]
+    bucket = upload["bucket"]
+    blob = upload["blob"]
 
-    # -------------------------------------------------
-    # 4. FINAL REDIS STATE (THIS POWERS DOWNLOAD BUTTON)
-    # -------------------------------------------------
+    signed_url = generate_signed_url(
+        bucket_name=bucket,
+        blob_path=blob,
+        expires_days=1,   # ✅ MATCHES gcs.py
+    )
+
+    # ---------------------------------------------
+    # 4. FINAL REDIS STATE (UI DOWNLOAD)
+    # ---------------------------------------------
     r.hset(
         f"job_status:{job_id}",
         mapping={
             "status": "COMPLETED",
             "stage": "Completed",
             "progress": 100,
-            "output_path": gcs_uri,
+            "output_path": signed_url,
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
-    log(f"Job completed → {gcs_uri}")
+    log(f"Job completed → {signed_url}")
 
-    return {"output_path": gcs_uri}
+    return {
+        "gcs_uri": upload["gcs_uri"],
+        "signed_url": signed_url,
+    }
