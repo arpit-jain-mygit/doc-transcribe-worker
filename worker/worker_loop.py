@@ -63,7 +63,7 @@ while True:
         logger.info(f"Job payload keys={list(job.keys())}")
 
         # ---------------------------------------------
-        # Mark job as processing
+        # Mark job as PROCESSING (initial only)
         # ---------------------------------------------
         logger.info(f"Marking job {job_id} as PROCESSING in Redis")
 
@@ -90,21 +90,33 @@ while True:
         duration = round(time.time() - job_start, 2)
 
         # ---------------------------------------------
-        # Mark success
+        # FINALIZE (SAFE: DO NOT OVERRIDE APPROVAL STATE)
         # ---------------------------------------------
-        logger.info(f"Finalizing job {job_id} in Redis")
+        current = r.hgetall(key)
+        current_status = current.get("status")
 
-        r.hset(
-            key,
-            mapping={
-                "status": "COMPLETED",
-                "progress": 100,
-                "updated_at": datetime.utcnow().isoformat(),
-                "duration_sec": duration,
-            },
+        logger.info(
+            f"Post-dispatch Redis status for job {job_id}: {current_status}"
         )
 
-        logger.info(f"Job completed: {job_id} in {duration}s")
+        if current_status in ("WAITING_APPROVAL", "APPROVED"):
+            logger.info(
+                f"Skipping status overwrite for job {job_id} (status={current_status})"
+            )
+        else:
+            logger.info(f"Finalizing job {job_id} as COMPLETED")
+
+            r.hset(
+                key,
+                mapping={
+                    "status": "COMPLETED",
+                    "progress": 100,
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "duration_sec": duration,
+                },
+            )
+
+        logger.info(f"Worker finished job {job_id} in {duration}s")
 
     except Exception as e:
         # ---------------------------------------------
@@ -115,6 +127,7 @@ while True:
         try:
             if "job_id" in locals():
                 logger.error(f"Marking job {job_id} as FAILED")
+
                 r.hset(
                     key,
                     mapping={
@@ -123,8 +136,10 @@ while True:
                         "updated_at": datetime.utcnow().isoformat(),
                     },
                 )
+
                 r.lpush(DLQ_NAME, job_raw)
                 logger.error(f"Job moved to DLQ: {job_id}")
+
         except Exception:
             logger.exception("Failed while handling job failure")
 

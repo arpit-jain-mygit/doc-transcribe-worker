@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 REAL AUDIO TRANSCRIPTION (Gemini ASR)
-WITH VERBOSE LOGGING + GCS OUTPUT + SIGNED DOWNLOAD URL
+WITH VERBOSE LOGGING + GCS OUTPUT + APPROVAL GATE
 """
 
 import os
@@ -19,7 +19,7 @@ from pydub import AudioSegment
 from google.cloud import aiplatform
 from vertexai.preview.generative_models import GenerativeModel, Part
 
-from worker.utils.gcs import upload_text, download_from_gcs, generate_signed_url
+from worker.utils.gcs import upload_text, download_from_gcs
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -93,11 +93,11 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = re.sub(r"\s+", "_", name).strip("_")
     return name[:max_len]
 
-def update(job_id: str, *, stage: str, progress: int):
+def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"):
     r.hset(
         f"job_status:{job_id}",
         mapping={
-            "status": "PROCESSING",
+            "status": status,
             "stage": stage,
             "progress": progress,
             "updated_at": datetime.utcnow().isoformat(),
@@ -154,9 +154,9 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 # ENTRYPOINT
 # =========================================================
 def run_transcription(job_id: str, job: dict) -> dict:
-    # ---------------------------------------------
+    # -------------------------------------------------
     # 1. Download input from GCS
-    # ---------------------------------------------
+    # -------------------------------------------------
     if "input_gcs_uri" not in job:
         raise RuntimeError("input_gcs_uri missing in job payload")
 
@@ -168,9 +168,9 @@ def run_transcription(job_id: str, job: dict) -> dict:
 
     log(f"Using local input: {local_input}")
 
-    # ---------------------------------------------
+    # -------------------------------------------------
     # 2. Transcription
-    # ---------------------------------------------
+    # -------------------------------------------------
     update(job_id, stage="Preparing audio", progress=5)
 
     chunks = split_audio(local_input)
@@ -186,9 +186,9 @@ def run_transcription(job_id: str, job: dict) -> dict:
         )
         texts.append(transcribe_chunk(chunk, idx, total))
 
-    # ---------------------------------------------
+    # -------------------------------------------------
     # 3. Upload transcript to GCS
-    # ---------------------------------------------
+    # -------------------------------------------------
     final_text = "\n\n".join(texts)
 
     upload = upload_text(
@@ -196,32 +196,23 @@ def run_transcription(job_id: str, job: dict) -> dict:
         destination_path=f"jobs/{job_id}/transcript.txt",
     )
 
-    bucket = upload["bucket"]
-    blob = upload["blob"]
-
-    signed_url = generate_signed_url(
-        bucket_name=bucket,
-        blob_path=blob,
-        expires_days=1,   # ✅ MATCHES gcs.py
-    )
-
-    # ---------------------------------------------
-    # 4. FINAL REDIS STATE (UI DOWNLOAD)
-    # ---------------------------------------------
+    # -------------------------------------------------
+    # 4. WAIT FOR APPROVAL (CRITICAL FIX)
+    # -------------------------------------------------
     r.hset(
         f"job_status:{job_id}",
         mapping={
-            "status": "COMPLETED",
-            "stage": "Completed",
+            "status": "WAITING_APPROVAL",
+            "stage": "Awaiting approval",
             "progress": 100,
-            "output_path": signed_url,
+            "gcs_uri": upload["gcs_uri"],
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
-    log(f"Job completed → {signed_url}")
+    log(f"Job finished transcription, waiting approval → {upload['gcs_uri']}")
 
     return {
         "gcs_uri": upload["gcs_uri"],
-        "signed_url": signed_url,
+        "status": "WAITING_APPROVAL",
     }
