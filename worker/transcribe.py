@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 REAL AUDIO TRANSCRIPTION (Gemini ASR)
-WITH VERBOSE LOGGING + GCS OUTPUT + APPROVAL GATE
+WITH VERBOSE LOGGING + GCS OUTPUT
+(NO APPROVAL GATE)
 """
 
 import os
@@ -92,6 +93,7 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = re.sub(r"[\\/:*?\"<>|]", "_", name)
     name = re.sub(r"\s+", "_", name).strip("_")
     return name[:max_len]
+
 
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"):
     r.hset(
@@ -197,22 +199,22 @@ def run_transcription(job_id: str, job: dict) -> dict:
     )
 
     # -------------------------------------------------
-    # 4. WAIT FOR APPROVAL (CRITICAL FIX)
+    # 4. FINAL STATE — COMPLETED (NO APPROVAL)
     # -------------------------------------------------
     r.hset(
         f"job_status:{job_id}",
         mapping={
-            "status": "WAITING_APPROVAL",
-            "stage": "Awaiting approval",
+            "status": "COMPLETED",
+            "stage": "Completed",
             "progress": 100,
-            "gcs_uri": upload["gcs_uri"],
+            "output_path": upload["gcs_uri"],
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
 
-    log(f"Job finished transcription, waiting approval → {upload['gcs_uri']}")
+    log(f"Job completed → {upload['gcs_uri']}")
 
     return {
         "gcs_uri": upload["gcs_uri"],
-        "status": "WAITING_APPROVAL",
+        "status": "COMPLETED",
     }
