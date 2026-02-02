@@ -28,8 +28,20 @@ logger.info(f"REDIS_URL={REDIS_URL}")
 logger.info("Connecting to Redis")
 
 try:
-    r = redis.from_url(REDIS_URL, decode_responses=True)
+    r = redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_keepalive=True,
+        socket_connect_timeout=5,
+        retry_on_timeout=True,
+        health_check_interval=30,  # ✅ ADD THIS
+    )
     r.ping()
+    try:
+        r.client_setname("doc-worker")
+    except Exception:
+        pass
+
     logger.info("Redis connection successful")
 except Exception:
     logger.exception("Redis connection failed")
@@ -48,7 +60,12 @@ while True:
         logger.info("Waiting for job (BRPOP)...")
 
         start_wait = time.time()
-        queue, job_raw = r.brpop(QUEUE_NAME)
+        result = r.brpop(QUEUE_NAME, timeout=30)
+        if result is None:
+            logger.debug("BRPOP timeout — still alive")
+            continue
+
+        queue, job_raw = result
         wait_time = round(time.time() - start_wait, 2)
 
         logger.info(f"BRPOP returned from queue={queue}")
