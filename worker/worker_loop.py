@@ -123,6 +123,8 @@ while True:
         else:
             logger.info(f"Finalizing job {job_id} as COMPLETED")
 
+            # IMPORTANT:
+            # Do NOT overwrite existing fields like output_path
             r.hset(
                 key,
                 mapping={
@@ -132,6 +134,10 @@ while True:
                     "duration_sec": duration,
                 },
             )
+
+            # ✅ Preserve output_path if already written by pipeline
+            # (no-op if it already exists)
+            r.hsetnx(key, "output_path", current.get("output_path"))
 
         logger.info(f"Worker finished job {job_id} in {duration}s")
 
