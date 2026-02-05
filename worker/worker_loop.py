@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger("worker")
 
 # =========================================================
-# REDIS INIT
+# CONFIG
 # =========================================================
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 if not REDIS_URL:
@@ -26,38 +26,19 @@ if not REDIS_URL:
 QUEUE_NAME = "doc_jobs"
 DLQ_NAME = "doc_jobs_dead"
 
-# =========================================================
-# DIAGNOSTIC HELPERS (LOG ONLY — NO LOGIC CHANGE)
-# =========================================================
-def log_redis_health(r, prefix=""):
-    try:
-        start = time.time()
-        pong = r.ping()
-        latency = int((time.time() - start) * 1000)
-        logger.info(f"{prefix}Redis PING ok={pong} latency={latency}ms")
-    except Exception as e:
-        logger.error(f"{prefix}Redis PING FAILED: {e}")
-
-def log_queue_depth(r):
-    try:
-        depth = r.llen(QUEUE_NAME)
-        logger.info(f"Queue depth {QUEUE_NAME} = {depth}")
-    except Exception as e:
-        logger.error(f"Failed to read queue depth: {e}")
+BRPOP_TIMEOUT = 10              # seconds
+MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
 
 # =========================================================
-# STARTUP
+# REDIS CONNECT
 # =========================================================
-logger.info("Starting worker")
-logger.info(f"REDIS_URL={REDIS_URL}")
-logger.info("Connecting to Redis")
-
-try:
+def connect_redis():
+    logger.info("Connecting to Redis")
     r = redis.from_url(
         REDIS_URL,
         decode_responses=True,
         socket_keepalive=True,
-        socket_connect_timeout=1,
+        socket_connect_timeout=2,
         retry_on_timeout=True,
         health_check_interval=30,
     )
@@ -71,50 +52,83 @@ try:
         logger.warning("Could not set Redis client name")
 
     try:
-        client_id = r.client_id()
-        logger.info(f"Redis client_id={client_id}")
+        logger.info(f"Redis client_id={r.client_id()}")
     except Exception:
         logger.warning("Could not fetch Redis client_id")
 
     logger.info("Redis connection successful")
+    return r
 
-except Exception:
-    logger.exception("Redis connection failed")
-    raise
+# =========================================================
+# DIAGNOSTIC HELPERS
+# =========================================================
+def log_redis_health(r, prefix=""):
+    try:
+        t0 = time.time()
+        pong = r.ping()
+        latency = int((time.time() - t0) * 1000)
+        logger.info(f"{prefix}Redis PING ok={pong} latency={latency}ms")
+    except Exception as e:
+        logger.error(f"{prefix}Redis PING FAILED: {e}")
+
+def log_queue_depth(r):
+    try:
+        depth = r.llen(QUEUE_NAME)
+        logger.info(f"Queue depth {QUEUE_NAME}={depth}")
+    except Exception as e:
+        logger.error(f"Failed to read queue depth: {e}")
+
+# =========================================================
+# STARTUP
+# =========================================================
+logger.info("Starting worker")
+logger.info(f"REDIS_URL={REDIS_URL}")
+
+r = connect_redis()
 
 logger.info(f"Listening on Redis queue: {QUEUE_NAME}")
+
+last_job_ts = time.time()
 
 # =========================================================
 # MAIN LOOP
 # =========================================================
 while True:
     try:
+        idle_for = int(time.time() - last_job_ts)
+
         # -------------------------------------------------
-        # HEARTBEAT — proves loop is alive even when idle
+        # IDLE SAFETY RECONNECT (THE FIX)
         # -------------------------------------------------
-        if int(time.time()) % 60 == 0:
-            logger.info("Worker heartbeat — loop alive")
+        if idle_for > MAX_IDLE_BEFORE_RECONNECT:
+            logger.warning(
+                f"Worker idle for {idle_for}s — reconnecting Redis"
+            )
+            try:
+                r.close()
+            except Exception:
+                pass
+            r = connect_redis()
+            last_job_ts = time.time()
 
         logger.info("Entering BRPOP wait")
 
         start_wait = time.time()
-        result = r.brpop(QUEUE_NAME, timeout=30)
-        wait_time = round(time.time() - start_wait, 2)
+        result = r.brpop(QUEUE_NAME, timeout=BRPOP_TIMEOUT)
+        waited = round(time.time() - start_wait, 2)
 
         if result is None:
-            logger.info(f"BRPOP timeout after {wait_time}s (idle but alive)")
-            log_redis_health(r, prefix="[after-timeout] ")
+            logger.info(f"BRPOP timeout after {waited}s (idle)")
+            log_redis_health(r, prefix="[timeout] ")
             time.sleep(0.1)
             continue
 
-        logger.info(f"BRPOP returned after {wait_time}s")
-
         queue, job_raw = result
+        last_job_ts = time.time()
 
+        logger.info(f"BRPOP returned after {waited}s from queue={queue}")
         log_queue_depth(r)
         log_redis_health(r, prefix="[job-received] ")
-
-        logger.debug(f"Raw job payload={job_raw}")
 
         job = json.loads(job_raw)
         job_id = job.get("job_id", "UNKNOWN")
@@ -126,8 +140,6 @@ while True:
         # -------------------------------------------------
         # MARK PROCESSING
         # -------------------------------------------------
-        logger.info(f"Marking job {job_id} as PROCESSING")
-
         r.hset(
             key,
             mapping={
@@ -145,55 +157,37 @@ while True:
 
         output = dispatch(job)
 
-        dispatch_time = round(time.time() - dispatch_start, 2)
-        logger.info(f"Dispatch END job_id={job_id} took {dispatch_time}s")
-        logger.info(f"Dispatch output={output}")
+        duration = round(time.time() - dispatch_start, 2)
+        logger.info(
+            f"Dispatch END job_id={job_id} duration={duration}s output={output}"
+        )
 
         # -------------------------------------------------
         # FINALIZE
         # -------------------------------------------------
-        log_redis_health(r, prefix="[pre-finalize] ")
-
         current = r.hgetall(key)
         current_status = current.get("status")
 
-        logger.info(
-            f"Post-dispatch Redis status job_id={job_id} status={current_status}"
-        )
-
-        if current_status in ("WAITING_APPROVAL", "APPROVED"):
-            logger.info(
-                f"Skipping overwrite for job {job_id} (status={current_status})"
-            )
-        else:
-            logger.info(f"Finalizing job {job_id} as COMPLETED")
-
+        if current_status not in ("WAITING_APPROVAL", "APPROVED"):
             r.hset(
                 key,
                 mapping={
                     "status": "COMPLETED",
                     "progress": 100,
                     "updated_at": datetime.utcnow().isoformat(),
-                    "duration_sec": dispatch_time,
+                    "duration_sec": duration,
                 },
             )
-
             r.hsetnx(key, "output_path", current.get("output_path"))
 
         logger.info(f"Worker finished job {job_id}")
-
         time.sleep(0.1)
 
     except Exception as e:
-        # -------------------------------------------------
-        # FAILURE HANDLING
-        # -------------------------------------------------
         logger.exception("Worker error")
 
         try:
             if "job_id" in locals():
-                logger.error(f"Marking job {job_id} as FAILED")
-
                 r.hset(
                     key,
                     mapping={
@@ -202,10 +196,8 @@ while True:
                         "updated_at": datetime.utcnow().isoformat(),
                     },
                 )
-
                 r.lpush(DLQ_NAME, job_raw)
-                logger.error(f"Job moved to DLQ: {job_id}")
-
+                logger.error(f"Job {job_id} moved to DLQ")
         except Exception:
             logger.exception("Failure during error handling")
 
