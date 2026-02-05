@@ -4,6 +4,8 @@ REAL AUDIO TRANSCRIPTION (Gemini ASR)
 WITH VERBOSE LOGGING + GCS OUTPUT
 (NO APPROVAL GATE)
 REDIS SAFE (RECONNECT ON STALE CONNECTION)
+
+⚠️ DIAGNOSTIC BUILD — NO BEHAVIOR CHANGES
 """
 
 import os
@@ -11,6 +13,7 @@ import sys
 import re
 import time
 import unicodedata
+import hashlib
 from datetime import datetime
 from typing import List
 
@@ -129,23 +132,52 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
     )
 
 # =========================================================
-# AUDIO SPLIT
+# AUDIO SPLIT (DIAGNOSTIC)
 # =========================================================
 def split_audio(mp3_path: str) -> List[str]:
+    # ---- File-level diagnostics
+    file_size = os.path.getsize(mp3_path)
+    with open(mp3_path, "rb") as f:
+        mp3_md5 = hashlib.md5(f.read()).hexdigest()
+
+    log(f"MP3 file size={file_size} bytes")
+    log(f"MP3 md5={mp3_md5}")
+
     audio = AudioSegment.from_file(mp3_path)
+
+    # ---- Decode diagnostics
+    log(f"Decoded frame_rate={audio.frame_rate}")
+    log(f"Decoded channels={audio.channels}")
+    log(f"Decoded sample_width={audio.sample_width}")
+    log(f"Decoded duration_ms={len(audio)}")
+
+    # ---- PCM head hash (first 30s)
+    pcm_head = audio[:30000].raw_data
+    pcm_md5 = hashlib.md5(pcm_head).hexdigest()
+    log(f"PCM head (30s) md5={pcm_md5}")
+
     duration_sec = int(len(audio) / 1000)
-    log(f"Audio duration: {duration_sec}s")
+    log(f"Audio duration seconds={duration_sec}")
 
     chunk_ms = CHUNK_DURATION_SEC * 1000
     chunks = []
 
     for i, start in enumerate(range(0, len(audio), chunk_ms), start=1):
+        chunk_audio = audio[start:start + chunk_ms]
+
+        chunk_pcm_md5 = hashlib.md5(chunk_audio.raw_data).hexdigest()
+        log(
+            f"Chunk {i} duration_ms={len(chunk_audio)} "
+            f"pcm_md5={chunk_pcm_md5}"
+        )
+
         out = mp3_path.replace(".mp3", f"_chunk_{i}.mp3")
-        audio[start:start + chunk_ms].export(out, format="mp3")
-        log(f"Created chunk {i}: {os.path.basename(out)}")
+        chunk_audio.export(out, format="mp3")
+
+        log(f"Created chunk file={os.path.basename(out)}")
         chunks.append(out)
 
-    log(f"Total chunks: {len(chunks)}")
+    log(f"Total chunks={len(chunks)}")
     return chunks
 
 # =========================================================
@@ -156,6 +188,8 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 
     with open(mp3_path, "rb") as f:
         audio_bytes = f.read()
+
+    log(f"Chunk {idx} mp3 size={len(audio_bytes)} bytes")
 
     t0 = time.perf_counter()
     response = model.generate_content(
@@ -172,6 +206,7 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
     if not text:
         raise RuntimeError("Empty transcription output")
 
+    log(f"Chunk {idx} transcript chars={len(text)}")
     return text
 
 # =========================================================
@@ -190,7 +225,7 @@ def run_transcription(job_id: str, job: dict) -> dict:
     if not os.path.exists(local_input):
         raise FileNotFoundError(local_input)
 
-    log(f"Using local input: {local_input}")
+    log(f"Using local input={local_input}")
 
     # -------------------------------------------------
     # 2. Transcription
@@ -214,6 +249,7 @@ def run_transcription(job_id: str, job: dict) -> dict:
     # 3. Upload transcript to GCS
     # -------------------------------------------------
     final_text = "\n\n".join(texts)
+    log(f"Final transcript length chars={len(final_text)}")
 
     upload = upload_text(
         content=final_text,
