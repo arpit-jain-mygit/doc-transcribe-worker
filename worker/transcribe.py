@@ -3,6 +3,7 @@
 REAL AUDIO TRANSCRIPTION (Gemini ASR)
 WITH VERBOSE LOGGING + GCS OUTPUT
 (NO APPROVAL GATE)
+REDIS SAFE (RECONNECT ON STALE CONNECTION)
 """
 
 import os
@@ -52,9 +53,31 @@ if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
 
 # =========================================================
-# REDIS
+# REDIS (SAFE FACTORY)
 # =========================================================
-r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+def get_redis():
+    return redis.Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_keepalive=True,
+        socket_connect_timeout=2,
+        retry_on_timeout=True,
+        health_check_interval=15,
+    )
+
+# =========================================================
+# REDIS SAFE WRITE
+# =========================================================
+def safe_hset(key: str, mapping: dict, retries: int = 1):
+    for attempt in range(retries + 1):
+        try:
+            r = get_redis()
+            r.hset(key, mapping=mapping)
+            return
+        except redis.exceptions.ConnectionError as e:
+            log(f"Redis HSET failed (attempt {attempt + 1}): {e}")
+            if attempt >= retries:
+                raise
 
 # =========================================================
 # INIT VERTEX
@@ -94,11 +117,10 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = re.sub(r"\s+", "_", name).strip("_")
     return name[:max_len]
 
-
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"):
-    r.hset(
+    safe_hset(
         f"job_status:{job_id}",
-        mapping={
+        {
             "status": status,
             "stage": stage,
             "progress": progress,
@@ -199,11 +221,11 @@ def run_transcription(job_id: str, job: dict) -> dict:
     )
 
     # -------------------------------------------------
-    # 4. FINAL STATE — COMPLETED (NO APPROVAL)
+    # 4. FINAL STATE — COMPLETED
     # -------------------------------------------------
-    r.hset(
+    safe_hset(
         f"job_status:{job_id}",
-        mapping={
+        {
             "status": "COMPLETED",
             "stage": "Completed",
             "progress": 100,
