@@ -212,7 +212,7 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 # =========================================================
 # ENTRYPOINT
 # =========================================================
-def run_transcription(job_id: str, job: dict) -> dict:
+def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
     # -------------------------------------------------
     # 1. Download input from GCS
     # -------------------------------------------------
@@ -259,16 +259,17 @@ def run_transcription(job_id: str, job: dict) -> dict:
     # -------------------------------------------------
     # 4. FINAL STATE — COMPLETED
     # -------------------------------------------------
-    safe_hset(
-        f"job_status:{job_id}",
-        {
-            "status": "COMPLETED",
-            "stage": "Completed",
-            "progress": 100,
-            "output_path": upload["gcs_uri"],
-            "updated_at": datetime.utcnow().isoformat(),
-        },
-    )
+    if finalize:
+        safe_hset(
+            f"job_status:{job_id}",
+            {
+                "status": "COMPLETED",
+                "stage": "Completed",
+                "progress": 100,
+                "output_path": upload["gcs_uri"],
+                "updated_at": datetime.utcnow().isoformat(),
+            },
+        )
 
     log(f"Job completed → {upload['gcs_uri']}")
 
