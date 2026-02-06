@@ -178,8 +178,6 @@ while True:
                     "duration_sec": duration,
                 },
             )
-            r.hsetnx(key, "output_path", current.get("output_path"))
-
         logger.info(f"Worker finished job {job_id}")
         time.sleep(0.1)
 
