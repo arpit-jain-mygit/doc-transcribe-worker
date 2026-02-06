@@ -64,6 +64,7 @@ def get_redis():
         decode_responses=True,
         socket_keepalive=True,
         socket_connect_timeout=2,
+        socket_timeout=15,  # ← THIS WAS MISSING
         retry_on_timeout=True,
         health_check_interval=15,
     )

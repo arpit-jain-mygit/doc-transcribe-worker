@@ -1,9 +1,10 @@
-import redis
 import json
 import time
 import logging
 import os
 from datetime import datetime
+import socket
+import redis
 
 from worker.dispatcher import dispatch
 
@@ -39,6 +40,7 @@ def connect_redis():
         decode_responses=True,
         socket_keepalive=True,
         socket_connect_timeout=2,
+        socket_timeout=15,              # ← ADD THIS
         retry_on_timeout=True,
         health_check_interval=30,
     )
@@ -114,7 +116,20 @@ while True:
         logger.info("Entering BRPOP wait")
 
         start_wait = time.time()
-        result = r.brpop(QUEUE_NAME, timeout=BRPOP_TIMEOUT)
+        try:
+            result = r.brpop(QUEUE_NAME, timeout=BRPOP_TIMEOUT)
+        except (socket.timeout, redis.exceptions.TimeoutError,redis.exceptions.ConnectionError,) as e:
+            waited = round(time.time() - start_wait, 2)
+            logger.warning(
+                f"Redis socket timeout after {waited}s — reconnecting ({e})"
+            )
+            try:
+                r.close()
+            except Exception:
+                pass
+            r = connect_redis()
+            continue
+
         waited = round(time.time() - start_wait, 2)
 
         if result is None:
