@@ -4,10 +4,13 @@ REAL PDF OCR (Gemini Vision OCR)
 Drop-in replacement for pytesseract-based ocr.py
 """
 
+import io
+import logging
 import os
+import re
 import sys
 import time
-import io
+import unicodedata
 from datetime import datetime
 from typing import List
 
@@ -22,6 +25,9 @@ from vertexai.preview.generative_models import (
     Part,
     Image as VertexImage,
 )
+
+from worker.cancel import ensure_not_cancelled
+from worker.utils.gcs import download_from_gcs, upload_text
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -42,9 +48,6 @@ MODEL_NAME = "gemini-2.5-flash"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DPI = 300
-OUTPUT_DIR = "output_texts"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
@@ -63,8 +66,11 @@ model = GenerativeModel(MODEL_NAME)
 # =========================================================
 # LOGGING
 # =========================================================
+logger = logging.getLogger("worker.ocr")
+
+
 def log(msg: str):
-    print(f"[OCR {datetime.utcnow().isoformat()}] {msg}", flush=True)
+    logger.info("[OCR %s] %s", datetime.utcnow().isoformat(), msg)
 
 # =========================================================
 # PROMPT
@@ -92,11 +98,24 @@ def pil_to_png_bytes(image: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def update(job_id: str, *, stage: str, progress: int, eta_sec: int = 0):
+def sanitize_filename(name: str, max_len: int = 180) -> str:
+    name = unicodedata.normalize("NFKC", name)
+    name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    if not name:
+        name = "transcript"
+    return name[:max_len]
+
+
+def normalize_output_filename(raw_name: str | None) -> str:
+    stem, _ = os.path.splitext(raw_name or "transcript")
+    return f"{sanitize_filename(stem)}.txt"
+
+
+def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING", eta_sec: int = 0):
     r.hset(
         f"job_status:{job_id}",
         mapping={
-            "status": "PROCESSING",
+            "status": status,
             "stage": stage,
             "progress": progress,
             "eta_sec": eta_sec,
@@ -137,13 +156,20 @@ def gemini_ocr(image: Image.Image, page_num: int) -> str:
 # =========================================================
 # WORKER ENTRYPOINT
 # =========================================================
-def run_ocr(job_id: str, job: dict) -> str:
-    input_path = job["input_path"]
+def run_ocr(job_id: str, job: dict) -> dict:
+    ensure_not_cancelled(job_id, r=r)
+    input_path = job.get("input_path")
+    if not input_path:
+        input_gcs_uri = job.get("input_gcs_uri")
+        if not input_gcs_uri:
+            raise RuntimeError("input_path or input_gcs_uri missing in OCR job")
+        input_path = download_from_gcs(input_gcs_uri)
 
     if not os.path.exists(input_path):
         raise FileNotFoundError(input_path)
 
     log(f"Starting OCR job_id={job_id}")
+    ensure_not_cancelled(job_id, r=r)
     update(job_id, stage="Loading PDF", progress=5, eta_sec=120)
 
     pages = convert_from_path(input_path, dpi=DPI)
@@ -155,6 +181,7 @@ def run_ocr(job_id: str, job: dict) -> str:
     start = time.perf_counter()
 
     for idx, page in enumerate(pages, start=1):
+        ensure_not_cancelled(job_id, r=r)
         update(
             job_id,
             stage=f"OCR page {idx}/{total_pages}",
@@ -177,11 +204,32 @@ def run_ocr(job_id: str, job: dict) -> str:
             },
         )
 
+    ensure_not_cancelled(job_id, r=r)
     update(job_id, stage="Finalizing OCR", progress=95)
 
-    out_path = os.path.join(OUTPUT_DIR, f"{job_id}.txt")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(texts))
+    final_text = "\n\n".join(texts)
+    output_filename = normalize_output_filename(job.get("output_filename") or job.get("filename"))
 
-    log(f"OCR completed → {out_path}")
-    return out_path
+    uploaded = upload_text(
+        content=final_text,
+        destination_path=f"jobs/{job_id}/{output_filename}",
+    )
+
+    r.hset(
+        f"job_status:{job_id}",
+        mapping={
+            "status": "COMPLETED",
+            "stage": "Completed",
+            "progress": 100,
+            "output_path": uploaded["gcs_uri"],
+            "output_filename": output_filename,
+            "updated_at": datetime.utcnow().isoformat(),
+        },
+    )
+
+    log(f"OCR completed -> {uploaded['gcs_uri']}")
+    return {
+        "gcs_uri": uploaded["gcs_uri"],
+        "output_filename": output_filename,
+        "status": "COMPLETED",
+    }

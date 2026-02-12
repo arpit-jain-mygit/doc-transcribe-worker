@@ -8,6 +8,7 @@ REDIS SAFE (RECONNECT ON STALE CONNECTION)
 ⚠️ DIAGNOSTIC BUILD — NO BEHAVIOR CHANGES
 """
 
+import logging
 import os
 import sys
 import re
@@ -24,6 +25,7 @@ from pydub import AudioSegment
 from google.cloud import aiplatform
 from vertexai.preview.generative_models import GenerativeModel, Part
 
+from worker.cancel import ensure_not_cancelled
 from worker.utils.gcs import upload_text, download_from_gcs
 
 # =========================================================
@@ -56,6 +58,15 @@ if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
 
 # =========================================================
+# LOGGING
+# =========================================================
+logger = logging.getLogger("worker.transcribe")
+
+
+def log(msg: str):
+    logger.info("[TRANSCRIBE %s] %s", datetime.utcnow().isoformat(), msg)
+
+# =========================================================
 # REDIS (SAFE FACTORY)
 # =========================================================
 def get_redis():
@@ -64,7 +75,7 @@ def get_redis():
         decode_responses=True,
         socket_keepalive=True,
         socket_connect_timeout=2,
-        socket_timeout=15,  # ← THIS WAS MISSING
+        socket_timeout=15,
         retry_on_timeout=True,
         health_check_interval=15,
     )
@@ -90,12 +101,6 @@ aiplatform.init(project=PROJECT_ID, location=LOCATION)
 model = GenerativeModel(MODEL_NAME)
 
 # =========================================================
-# LOGGING
-# =========================================================
-def log(msg: str):
-    print(f"[TRANSCRIBE {datetime.utcnow().isoformat()}] {msg}", flush=True)
-
-# =========================================================
 # PROMPT
 # =========================================================
 def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
@@ -117,9 +122,16 @@ AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
 # =========================================================
 def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = unicodedata.normalize("NFKC", name)
-    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
-    name = re.sub(r"\s+", "_", name).strip("_")
+    name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    if not name:
+        name = "transcript"
     return name[:max_len]
+
+
+def normalize_output_filename(raw_name: str | None) -> str:
+    stem, _ = os.path.splitext(raw_name or "transcript")
+    return f"{sanitize_filename(stem)}.txt"
+
 
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"):
     safe_hset(
@@ -136,7 +148,6 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
 # AUDIO SPLIT (DIAGNOSTIC)
 # =========================================================
 def split_audio(mp3_path: str) -> List[str]:
-    # ---- File-level diagnostics
     file_size = os.path.getsize(mp3_path)
     with open(mp3_path, "rb") as f:
         mp3_md5 = hashlib.md5(f.read()).hexdigest()
@@ -146,13 +157,11 @@ def split_audio(mp3_path: str) -> List[str]:
 
     audio = AudioSegment.from_file(mp3_path)
 
-    # ---- Decode diagnostics
     log(f"Decoded frame_rate={audio.frame_rate}")
     log(f"Decoded channels={audio.channels}")
     log(f"Decoded sample_width={audio.sample_width}")
     log(f"Decoded duration_ms={len(audio)}")
 
-    # ---- PCM head hash (first 30s)
     pcm_head = audio[:30000].raw_data
     pcm_md5 = hashlib.md5(pcm_head).hexdigest()
     log(f"PCM head (30s) md5={pcm_md5}")
@@ -214,9 +223,7 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 # ENTRYPOINT
 # =========================================================
 def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
-    # -------------------------------------------------
-    # 1. Download input from GCS
-    # -------------------------------------------------
+    ensure_not_cancelled(job_id)
     if "input_gcs_uri" not in job:
         raise RuntimeError("input_gcs_uri missing in job payload")
 
@@ -228,9 +235,7 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
 
     log(f"Using local input={local_input}")
 
-    # -------------------------------------------------
-    # 2. Transcription
-    # -------------------------------------------------
+    ensure_not_cancelled(job_id)
     update(job_id, stage="Preparing audio", progress=5)
 
     chunks = split_audio(local_input)
@@ -239,6 +244,7 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
     texts: List[str] = []
 
     for idx, chunk in enumerate(chunks, start=1):
+        ensure_not_cancelled(job_id)
         update(
             job_id,
             stage=f"Transcribing chunk {idx}/{total}",
@@ -246,20 +252,17 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
         )
         texts.append(transcribe_chunk(chunk, idx, total))
 
-    # -------------------------------------------------
-    # 3. Upload transcript to GCS
-    # -------------------------------------------------
+    ensure_not_cancelled(job_id)
     final_text = "\n\n".join(texts)
     log(f"Final transcript length chars={len(final_text)}")
 
+    output_filename = normalize_output_filename(job.get("output_filename") or job.get("filename"))
+
     upload = upload_text(
         content=final_text,
-        destination_path=f"jobs/{job_id}/transcript.txt",
+        destination_path=f"jobs/{job_id}/{output_filename}",
     )
 
-    # -------------------------------------------------
-    # 4. FINAL STATE — COMPLETED
-    # -------------------------------------------------
     if finalize:
         safe_hset(
             f"job_status:{job_id}",
@@ -268,13 +271,15 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
                 "stage": "Completed",
                 "progress": 100,
                 "output_path": upload["gcs_uri"],
+                "output_filename": output_filename,
                 "updated_at": datetime.utcnow().isoformat(),
             },
         )
 
-    log(f"Job completed → {upload['gcs_uri']}")
+    log(f"Job completed -> {upload['gcs_uri']}")
 
     return {
         "gcs_uri": upload["gcs_uri"],
+        "output_filename": output_filename,
         "status": "COMPLETED",
     }

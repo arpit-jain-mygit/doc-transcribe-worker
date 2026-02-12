@@ -5,8 +5,13 @@ import os
 from datetime import datetime
 import socket
 import redis
+from dotenv import load_dotenv
 
+from worker.cancel import JobCancelledError, is_cancelled
 from worker.dispatcher import dispatch
+
+# Load .env for local runs
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 # =========================================================
 # LOGGING SETUP
@@ -24,8 +29,8 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL not set")
 
-QUEUE_NAME = "doc_jobs"
-DLQ_NAME = "doc_jobs_dead"
+QUEUE_NAME = os.getenv("QUEUE_NAME", "doc_jobs")
+DLQ_NAME = os.getenv("DLQ_NAME", "doc_jobs_dead")
 
 BRPOP_TIMEOUT = 10              # seconds
 MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
@@ -40,7 +45,7 @@ def connect_redis():
         decode_responses=True,
         socket_keepalive=True,
         socket_connect_timeout=2,
-        socket_timeout=15,              # ← ADD THIS
+        socket_timeout=15,
         retry_on_timeout=True,
         health_check_interval=30,
     )
@@ -73,12 +78,14 @@ def log_redis_health(r, prefix=""):
     except Exception as e:
         logger.error(f"{prefix}Redis PING FAILED: {e}")
 
+
 def log_queue_depth(r):
     try:
         depth = r.llen(QUEUE_NAME)
         logger.info(f"Queue depth {QUEUE_NAME}={depth}")
     except Exception as e:
         logger.error(f"Failed to read queue depth: {e}")
+
 
 # =========================================================
 # STARTUP
@@ -99,9 +106,6 @@ while True:
     try:
         idle_for = int(time.time() - last_job_ts)
 
-        # -------------------------------------------------
-        # IDLE SAFETY RECONNECT (THE FIX)
-        # -------------------------------------------------
         if idle_for > MAX_IDLE_BEFORE_RECONNECT:
             logger.warning(
                 f"Worker idle for {idle_for}s — reconnecting Redis"
@@ -118,7 +122,7 @@ while True:
         start_wait = time.time()
         try:
             result = r.brpop(QUEUE_NAME, timeout=BRPOP_TIMEOUT)
-        except (socket.timeout, redis.exceptions.TimeoutError,redis.exceptions.ConnectionError,) as e:
+        except (socket.timeout, redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
             waited = round(time.time() - start_wait, 2)
             logger.warning(
                 f"Redis socket timeout after {waited}s — reconnecting ({e})"
@@ -152,9 +156,19 @@ while True:
         logger.info(f"Parsed job_id={job_id}")
         logger.info(f"Job payload keys={list(job.keys())}")
 
-        # -------------------------------------------------
-        # MARK PROCESSING
-        # -------------------------------------------------
+        current = r.hgetall(key)
+        if current and (current.get("cancel_requested") == "1" or (current.get("status") or "").upper() == "CANCELLED"):
+            logger.info(f"Skipping cancelled job_id={job_id}")
+            r.hset(
+                key,
+                mapping={
+                    "status": "CANCELLED",
+                    "stage": "Cancelled by user",
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            )
+            continue
+
         r.hset(
             key,
             mapping={
@@ -164,9 +178,6 @@ while True:
             },
         )
 
-        # -------------------------------------------------
-        # DISPATCH
-        # -------------------------------------------------
         logger.info(f"Dispatch START job_id={job_id}")
         dispatch_start = time.time()
 
@@ -177,13 +188,10 @@ while True:
             f"Dispatch END job_id={job_id} duration={duration}s output={output}"
         )
 
-        # -------------------------------------------------
-        # FINALIZE
-        # -------------------------------------------------
         current = r.hgetall(key)
-        current_status = current.get("status")
+        current_status = (current.get("status") or "").upper()
 
-        if current_status not in ("WAITING_APPROVAL", "APPROVED"):
+        if current_status not in ("WAITING_APPROVAL", "APPROVED", "CANCELLED"):
             r.hset(
                 key,
                 mapping={
@@ -196,21 +204,48 @@ while True:
         logger.info(f"Worker finished job {job_id}")
         time.sleep(0.1)
 
+    except JobCancelledError:
+        logger.info(f"Job {job_id} cancelled during processing")
+        try:
+            r.hset(
+                key,
+                mapping={
+                    "status": "CANCELLED",
+                    "stage": "Cancelled by user",
+                    "progress": 100,
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            )
+        except Exception:
+            logger.exception("Failed to mark job cancelled")
+        time.sleep(0.2)
+
     except Exception as e:
         logger.exception("Worker error")
 
         try:
             if "job_id" in locals():
-                r.hset(
-                    key,
-                    mapping={
-                        "status": "FAILED",
-                        "error": str(e),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    },
-                )
-                r.lpush(DLQ_NAME, job_raw)
-                logger.error(f"Job {job_id} moved to DLQ")
+                if is_cancelled(job_id, r=r):
+                    r.hset(
+                        key,
+                        mapping={
+                            "status": "CANCELLED",
+                            "stage": "Cancelled by user",
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                    )
+                    logger.info(f"Job {job_id} cancelled (post-error path)")
+                else:
+                    r.hset(
+                        key,
+                        mapping={
+                            "status": "FAILED",
+                            "error": str(e),
+                            "updated_at": datetime.utcnow().isoformat(),
+                        },
+                    )
+                    r.lpush(DLQ_NAME, job_raw)
+                    logger.error(f"Job {job_id} moved to DLQ")
         except Exception:
             logger.exception("Failure during error handling")
 

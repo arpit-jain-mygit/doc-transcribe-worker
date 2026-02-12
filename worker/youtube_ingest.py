@@ -3,6 +3,7 @@
 import tempfile
 from worker.youtube.yt_utils import expand_urls
 from worker.utils.gcs import upload_file
+from worker.cancel import JobCancelledError, ensure_not_cancelled
 from worker.transcribe import run_transcription, update
 import yt_dlp
 import os
@@ -44,6 +45,7 @@ def process_youtube_job(job_id: str, job: dict):
     results = []
 
     for idx, url in enumerate(urls, start=1):
+        ensure_not_cancelled(job_id)
         try:
             update(
                 job_id,
@@ -74,6 +76,8 @@ def process_youtube_job(job_id: str, job: dict):
 
                 result = run_transcription(job_id, child_job)
                 results.append(result)
+        except JobCancelledError:
+            raise
 
         except Exception as e:
             # 🔴 THIS WAS MISSING
