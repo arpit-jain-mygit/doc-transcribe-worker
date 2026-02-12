@@ -70,21 +70,21 @@ Used for **audio/video → text transcription**.
 {  
 "job_id": "transcribe-001",  
 "job_type": "TRANSCRIPTION",  
-"input_type": "VIDEO",  
-"url": "<https://www.youtube.com/watch?v=abc123>"  
+"input_type": "AUDIO",  
+"local_path": "samples/sample.mp3"  
 }  
 
 ### **Required Fields**
 
 | **Field** | **Description** |
 | --- | --- |
-| url | Public audio/video URL (e.g. YouTube) |
+| local_path | Local path to audio/video file |
 
 ### **Notes**
 
 - input_type may be VIDEO or AUDIO
-- Worker downloads audio locally before transcription
-- Caching may be applied based on video ID
+- Worker reads local audio/video from local_path
+- Remote URL ingestion is not supported
 
 ## **3\. Result Schema (Output)**
 

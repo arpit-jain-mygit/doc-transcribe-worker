@@ -6,9 +6,8 @@ redis>=5.0.0
 requests>=2.31.0
 
 # ------------------------------
-# YouTube / Audio Transcription
+# Audio Transcription
 # ------------------------------
-yt-dlp>=2024.3.10
 google-genai>=0.3.0
 
 # ------------------------------

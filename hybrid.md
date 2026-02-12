@@ -77,7 +77,7 @@ Worker should wake up within seconds.
 
 curl -X POST <https://doc-transcribe-api.onrender.com/jobs/transcription> \\  
 \-H "Content-Type: application/json" \\  
-\-d '{"url":"<https://www.youtube.com/watch?v=VIDEO_ID"}>'  
+\-d '{"local_path":"samples/sample.mp3"}'  
 
 ## **Step 6 - Monitor job status**
 

@@ -71,8 +71,8 @@ def test_video_transcription():
     job = {
         "job_id": "local-test-transcribe-001",
         "job_type": "TRANSCRIPTION",
-        "input_type": "VIDEO",
-        "url": "https://www.youtube.com/shorts/7TAgCPaSRaA",
+        "input_type": "AUDIO",
+        "local_path": "samples/sample.mp3",
     }
 
     log("Dispatching transcription job")

@@ -107,7 +107,7 @@ Worker logs should immediately show OCR progress.
 
 curl -X POST <http://localhost:8000/jobs/transcription> \\  
 \-H "Content-Type: application/json" \\  
-\-d '{"url":"<https://www.youtube.com/watch?v=VIDEO_ID"}>'  
+\-d '{"local_path":"samples/sample.mp3"}'  
 
 ## **Step 6 - Check job status**
 

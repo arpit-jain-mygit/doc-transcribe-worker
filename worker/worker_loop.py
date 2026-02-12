@@ -29,11 +29,59 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL not set")
 
+# Backward-compatible single-queue settings
 QUEUE_NAME = os.getenv("QUEUE_NAME", "doc_jobs")
 DLQ_NAME = os.getenv("DLQ_NAME", "doc_jobs_dead")
 
+# New mode flag: single | both
+QUEUE_MODE = os.getenv("QUEUE_MODE", "single").lower()
+
+# Queue aliases for dual-mode consumption
+CLOUD_QUEUE_NAME = os.getenv("CLOUD_QUEUE_NAME", "doc_jobs")
+CLOUD_DLQ_NAME = os.getenv("CLOUD_DLQ_NAME", "doc_jobs_dead")
+LOCAL_QUEUE_NAME = os.getenv("LOCAL_QUEUE_NAME", "doc_jobs_local")
+LOCAL_DLQ_NAME = os.getenv("LOCAL_DLQ_NAME", "doc_jobs_local_dead")
+
 BRPOP_TIMEOUT = 10              # seconds
 MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
+
+
+# =========================================================
+# QUEUE RESOLUTION
+# =========================================================
+def queue_targets() -> list[str]:
+    if QUEUE_MODE == "both":
+        targets = [LOCAL_QUEUE_NAME, CLOUD_QUEUE_NAME]
+        # Keep order stable while deduplicating
+        seen = set()
+        ordered = []
+        for q in targets:
+            if q and q not in seen:
+                seen.add(q)
+                ordered.append(q)
+        return ordered
+
+    return [QUEUE_NAME]
+
+
+def dlq_for_queue(queue: str) -> str:
+    if QUEUE_MODE == "both":
+        if queue == CLOUD_QUEUE_NAME:
+            return CLOUD_DLQ_NAME
+        if queue == LOCAL_QUEUE_NAME:
+            return LOCAL_DLQ_NAME
+    return DLQ_NAME
+
+
+def queue_source_label(queue: str) -> str:
+    if QUEUE_MODE == "both":
+        if queue == CLOUD_QUEUE_NAME:
+            return "CLOUD"
+        if queue == LOCAL_QUEUE_NAME:
+            return "LOCAL"
+        return "UNKNOWN"
+    return "SINGLE"
+
 
 # =========================================================
 # REDIS CONNECT
@@ -66,6 +114,7 @@ def connect_redis():
     logger.info("Redis connection successful")
     return r
 
+
 # =========================================================
 # DIAGNOSTIC HELPERS
 # =========================================================
@@ -79,12 +128,13 @@ def log_redis_health(r, prefix=""):
         logger.error(f"{prefix}Redis PING FAILED: {e}")
 
 
-def log_queue_depth(r):
-    try:
-        depth = r.llen(QUEUE_NAME)
-        logger.info(f"Queue depth {QUEUE_NAME}={depth}")
-    except Exception as e:
-        logger.error(f"Failed to read queue depth: {e}")
+def log_queue_depths(r):
+    for q in queue_targets():
+        try:
+            depth = r.llen(q)
+            logger.info(f"Queue depth {q}={depth}")
+        except Exception as e:
+            logger.error(f"Failed to read queue depth for {q}: {e}")
 
 
 # =========================================================
@@ -92,10 +142,10 @@ def log_queue_depth(r):
 # =========================================================
 logger.info("Starting worker")
 logger.info(f"REDIS_URL={REDIS_URL}")
+logger.info(f"QUEUE_MODE={QUEUE_MODE}")
+logger.info(f"QUEUE_TARGETS={queue_targets()}")
 
 r = connect_redis()
-
-logger.info(f"Listening on Redis queue: {QUEUE_NAME}")
 
 last_job_ts = time.time()
 
@@ -107,9 +157,7 @@ while True:
         idle_for = int(time.time() - last_job_ts)
 
         if idle_for > MAX_IDLE_BEFORE_RECONNECT:
-            logger.warning(
-                f"Worker idle for {idle_for}s — reconnecting Redis"
-            )
+            logger.warning(f"Worker idle for {idle_for}s — reconnecting Redis")
             try:
                 r.close()
             except Exception:
@@ -117,16 +165,15 @@ while True:
             r = connect_redis()
             last_job_ts = time.time()
 
-        logger.info("Entering BRPOP wait")
+        targets = queue_targets()
+        logger.info(f"Entering BRPOP wait targets={targets}")
 
         start_wait = time.time()
         try:
-            result = r.brpop(QUEUE_NAME, timeout=BRPOP_TIMEOUT)
+            result = r.brpop(targets, timeout=BRPOP_TIMEOUT)
         except (socket.timeout, redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
             waited = round(time.time() - start_wait, 2)
-            logger.warning(
-                f"Redis socket timeout after {waited}s — reconnecting ({e})"
-            )
+            logger.warning(f"Redis socket timeout after {waited}s — reconnecting ({e})")
             try:
                 r.close()
             except Exception:
@@ -143,10 +190,14 @@ while True:
             continue
 
         queue, job_raw = result
+        active_dlq = dlq_for_queue(queue)
+        source_label = queue_source_label(queue)
         last_job_ts = time.time()
 
         logger.info(f"BRPOP returned after {waited}s from queue={queue}")
-        log_queue_depth(r)
+        logger.info(f"Queue source classification={source_label}")
+        logger.info(f"DLQ target for this job={active_dlq}")
+        log_queue_depths(r)
         log_redis_health(r, prefix="[job-received] ")
 
         job = json.loads(job_raw)
@@ -184,9 +235,7 @@ while True:
         output = dispatch(job)
 
         duration = round(time.time() - dispatch_start, 2)
-        logger.info(
-            f"Dispatch END job_id={job_id} duration={duration}s output={output}"
-        )
+        logger.info(f"Dispatch END job_id={job_id} duration={duration}s output={output}")
 
         current = r.hgetall(key)
         current_status = (current.get("status") or "").upper()
@@ -244,7 +293,7 @@ while True:
                             "updated_at": datetime.utcnow().isoformat(),
                         },
                     )
-                    r.lpush(DLQ_NAME, job_raw)
+                    r.lpush(active_dlq if "active_dlq" in locals() else DLQ_NAME, job_raw)
                     logger.error(f"Job {job_id} moved to DLQ")
         except Exception:
             logger.exception("Failure during error handling")
