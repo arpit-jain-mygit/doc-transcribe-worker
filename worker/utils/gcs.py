@@ -82,8 +82,13 @@ def upload_text(
     bucket = client.bucket(GCS_BUCKET)
     blob = bucket.blob(destination_path)
 
+    # Prefix UTF-8 BOM so mobile viewers reliably detect Hindi text encoding.
+    payload = content
+    if isinstance(payload, str) and not payload.startswith("\ufeff"):
+        payload = "\ufeff" + payload
+
     blob.upload_from_string(
-        content,
+        payload,
         content_type=content_type,
     )
 
