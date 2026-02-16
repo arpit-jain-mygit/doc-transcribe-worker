@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from worker.cancel import JobCancelledError, is_cancelled
 from worker.contract import CONTRACT_VERSION
+from worker.status_machine import guarded_hset
 from worker.error_catalog import classify_error
 from worker.json_logging import configure_json_logging
 from worker.metrics import incr, observe_ms
@@ -238,8 +239,9 @@ while True:
         current = r.hgetall(key)
         if current and (current.get("cancel_requested") == "1" or (current.get("status") or "").upper() == "CANCELLED"):
             logger.info(f"Skipping cancelled job_id={job_id}")
-            r.hset(
-                key,
+            ok, prev_status, _ = guarded_hset(
+                r,
+                key=key,
                 mapping={
                     "contract_version": CONTRACT_VERSION,
                     "request_id": request_id,
@@ -251,11 +253,15 @@ while True:
                     "error_detail": "",
                     "error": "Job was cancelled by user.",
                 },
+                context="WORKER_SKIP_CANCELLED",
+                request_id=request_id,
             )
+            if not ok:
+                logger.warning("Skip-cancel update blocked job_id=%s from=%s", job_id, prev_status)
             continue
-
-        r.hset(
-            key,
+        ok, prev_status, _ = guarded_hset(
+            r,
+            key=key,
             mapping={
                 "contract_version": CONTRACT_VERSION,
                 "request_id": request_id,
@@ -264,7 +270,11 @@ while True:
                 "progress": 1,
                 "updated_at": datetime.utcnow().isoformat(),
             },
+            context="WORKER_PROCESSING_START",
+            request_id=request_id,
         )
+        if not ok:
+            raise RuntimeError(f"Invalid status transition to PROCESSING from {prev_status or 'NONE'}")
 
         logger.info(f"Dispatch START job_id={job_id} request_id={request_id}")
         log_stage_event(job_id=job_id, request_id=request_id, stage="DISPATCH", event="STARTED")
@@ -293,8 +303,9 @@ while True:
         current_status = (current.get("status") or "").upper()
 
         if current_status not in ("WAITING_APPROVAL", "APPROVED", "CANCELLED"):
-            r.hset(
-                key,
+            ok, prev_status, _ = guarded_hset(
+                r,
+                key=key,
                 mapping={
                     "contract_version": CONTRACT_VERSION,
                     "request_id": request_id,
@@ -308,7 +319,11 @@ while True:
                     "error_detail": "",
                     "error": "",
                 },
+                context="WORKER_COMPLETE",
+                request_id=request_id,
             )
+            if not ok:
+                logger.warning("Completion status update blocked job_id=%s from=%s", job_id, prev_status)
         logger.info(f"Worker finished job {job_id} request_id={request_id}")
         incr("worker_jobs_completed_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
         log_stage_event(job_id=job_id, request_id=request_id, stage="JOB_EXECUTION", event="COMPLETED")
@@ -319,8 +334,9 @@ while True:
         incr("worker_jobs_cancelled_total", queue=queue if "queue" in locals() else "UNKNOWN")
         log_stage_event(job_id=job_id, request_id=request_id if "request_id" in locals() else "", stage="JOB_EXECUTION", event="CANCELLED")
         try:
-            r.hset(
-                key,
+            ok, prev_status, _ = guarded_hset(
+                r,
+                key=key,
                 mapping={
                     "contract_version": CONTRACT_VERSION,
                     "request_id": request_id,
@@ -333,7 +349,11 @@ while True:
                     "error_detail": "",
                     "error": "Job was cancelled by user.",
                 },
+                context="WORKER_CANCELLED_EXCEPTION",
+                request_id=request_id,
             )
+            if not ok:
+                logger.warning("Cancelled status update blocked job_id=%s from=%s", job_id, prev_status)
         except Exception:
             logger.exception("Failed to mark job cancelled")
         time.sleep(0.2)
@@ -356,8 +376,9 @@ while True:
         try:
             if "job_id" in locals():
                 if is_cancelled(job_id, r=r):
-                    r.hset(
-                        key,
+                    ok, prev_status, _ = guarded_hset(
+                        r,
+                        key=key,
                         mapping={
                             "contract_version": CONTRACT_VERSION,
                             "request_id": request_id,
@@ -369,13 +390,18 @@ while True:
                             "error_detail": "",
                             "error": "Job was cancelled by user.",
                         },
+                        context="WORKER_ERROR_CANCELLED",
+                        request_id=request_id,
                     )
+                    if not ok:
+                        logger.warning("Post-error cancelled update blocked job_id=%s from=%s", job_id, prev_status)
                     logger.info(f"Job {job_id} cancelled (post-error path)")
                 else:
                     error_code, error_message = classify_error(e)
                     error_detail = f"{e.__class__.__name__}: {e}"
-                    r.hset(
-                        key,
+                    ok, prev_status, _ = guarded_hset(
+                        r,
+                        key=key,
                         mapping={
                             "contract_version": CONTRACT_VERSION,
                             "request_id": request_id,
@@ -387,7 +413,11 @@ while True:
                             "error": error_message,
                             "updated_at": datetime.utcnow().isoformat(),
                         },
+                        context="WORKER_ERROR_FAILED",
+                        request_id=request_id,
                     )
+                    if not ok:
+                        logger.warning("Failed status update blocked job_id=%s from=%s", job_id, prev_status)
                     r.lpush(active_dlq if "active_dlq" in locals() else DLQ_NAME, job_raw)
                     logger.error(
                         "Job %s request_id=%s moved to DLQ error_code=%s detail=%s",

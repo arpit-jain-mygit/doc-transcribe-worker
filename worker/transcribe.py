@@ -28,6 +28,7 @@ from vertexai.preview.generative_models import GenerativeModel, Part
 from worker.cancel import ensure_not_cancelled
 from worker.contract import CONTRACT_VERSION
 from worker.utils.gcs import upload_text, download_from_gcs
+from worker.status_machine import guarded_hset
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -88,7 +89,15 @@ def safe_hset(key: str, mapping: dict, retries: int = 1):
     for attempt in range(retries + 1):
         try:
             r = get_redis()
-            r.hset(key, mapping=mapping)
+            ok, current_status, _ = guarded_hset(
+                r,
+                key=key,
+                mapping=mapping,
+                context="TRANSCRIBE_SAFE_HSET",
+                request_id=str(mapping.get("request_id") or ""),
+            )
+            if not ok:
+                log(f"Blocked status transition key={key} from={current_status} to={mapping.get('status')}")
             return
         except redis.exceptions.ConnectionError as e:
             log(f"Redis HSET failed (attempt {attempt + 1}): {e}")
