@@ -112,8 +112,22 @@ def normalize_output_filename(raw_name: str | None) -> str:
     return f"{sanitize_filename(stem)}.txt"
 
 
+
+
+def safe_hset(key: str, mapping: dict, retries: int = 1):
+    for attempt in range(retries + 1):
+        try:
+            rc = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_keepalive=True, socket_connect_timeout=2, socket_timeout=10, retry_on_timeout=True, health_check_interval=15)
+            rc.hset(key, mapping=mapping)
+            return
+        except redis.exceptions.ConnectionError as exc:
+            logger.warning("ocr_safe_hset_connection_error attempt=%s/%s error=%s", attempt + 1, retries + 1, exc)
+            if attempt >= retries:
+                raise
+            time.sleep(0.15)
+
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING", eta_sec: int = 0):
-    r.hset(
+    safe_hset(
         f"job_status:{job_id}",
         mapping={
             "contract_version": CONTRACT_VERSION,
@@ -197,9 +211,9 @@ def run_ocr(job_id: str, job: dict) -> dict:
         avg = elapsed / idx
         eta = int(avg * (total_pages - idx))
 
-        r.hset(
+        safe_hset(
             f"job_status:{job_id}",
-            mapping={
+            {
                 "current_page": idx,
                 "total_pages": total_pages,
                 "eta_sec": eta,
@@ -217,9 +231,9 @@ def run_ocr(job_id: str, job: dict) -> dict:
         destination_path=f"jobs/{job_id}/{output_filename}",
     )
 
-    r.hset(
+    safe_hset(
         f"job_status:{job_id}",
-        mapping={
+        {
             "contract_version": CONTRACT_VERSION,
             "status": "COMPLETED",
             "stage": "Completed",

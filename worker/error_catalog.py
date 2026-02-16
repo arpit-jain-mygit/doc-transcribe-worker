@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import redis
+
 
 def classify_error(exc: Exception) -> tuple[str, str]:
     text = f"{exc}".strip()
@@ -11,6 +13,12 @@ def classify_error(exc: Exception) -> tuple[str, str]:
         return ("MEDIA_DECODE_FAILED", "Input media could not be decoded. Please upload a supported file.")
     if isinstance(exc, FileNotFoundError) or "no such file" in low:
         return ("INPUT_NOT_FOUND", "Input file was not found for processing.")
-    if "redis" in low or "connection closed" in low or "timeout" in low:
+    if (
+        isinstance(exc, redis.exceptions.ConnectionError)
+        or "redis" in low
+        or "connection closed" in low
+        or "closed by server" in low
+        or "timeout" in low
+    ):
         return ("INFRA_REDIS", "Queue/storage connection issue while processing.")
     return ("PROCESSING_FAILED", "Processing failed due to an internal error.")
