@@ -3,9 +3,36 @@ from __future__ import annotations
 import redis
 
 
+def _is_gcs_connection_error(low: str) -> bool:
+    connection_markers = (
+        "remote end closed connection",
+        "remotedisconnected",
+        "connection aborted",
+        "connection reset",
+        "httpsconnectionpool",
+        "sslerror",
+    )
+    gcs_markers = (
+        "storage.googleapis.com",
+        "googleapis.com/storage",
+        "google.cloud.storage",
+        "gcs",
+        "signed_url",
+        "upload",
+        "download",
+        "blob",
+    )
+    has_connection_issue = any(m in low for m in connection_markers)
+    has_gcs_context = any(m in low for m in gcs_markers)
+    return has_connection_issue and has_gcs_context
+
+
 def classify_error(exc: Exception) -> tuple[str, str]:
     text = f"{exc}".strip()
     low = text.lower()
+
+    if _is_gcs_connection_error(low):
+        return ("INFRA_GCS", "Storage service connection issue while uploading output. Please retry.")
 
     if "resource exhausted" in low or "429" in low or "quota" in low:
         return ("RATE_LIMIT_EXCEEDED", "Service is busy right now. Please retry shortly.")

@@ -4,6 +4,7 @@
 import os
 import json
 import base64
+import time
 from datetime import datetime, timedelta
 from google.cloud import storage
 import logging
@@ -18,6 +19,52 @@ if not GCS_BUCKET:
 
 _client = None
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s, using default=%s", name, raw, default)
+        return default
+    return max(0, value)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s, using default=%s", name, raw, default)
+        return default
+    return max(0.0, value)
+
+
+GCS_RETRIES = _env_int("GCS_RETRIES", 3)
+GCS_BACKOFF_SEC = _env_float("GCS_BACKOFF_SEC", 0.5)
+
+
+def _retry_io(operation: str, target: str, fn):
+    for attempt in range(GCS_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            logger.warning(
+                "gcs_io_retry op=%s attempt=%s/%s target=%s error=%s",
+                operation,
+                attempt + 1,
+                GCS_RETRIES + 1,
+                target,
+                exc,
+            )
+            if attempt >= GCS_RETRIES:
+                raise
+            time.sleep(GCS_BACKOFF_SEC * (2 ** attempt))
 
 
 def _get_client():
@@ -47,10 +94,14 @@ def _signed_url(blob, expires_days: int = 7) -> str:
     """
     Generate browser-downloadable HTTPS URL.
     """
-    return blob.generate_signed_url(
-        version="v4",
-        expiration=timedelta(days=expires_days),
-        method="GET",
+    return _retry_io(
+        operation="signed_url",
+        target=getattr(blob, "name", "unknown"),
+        fn=lambda: blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(days=expires_days),
+            method="GET",
+        ),
     )
 
 
@@ -87,9 +138,13 @@ def upload_text(
     if isinstance(payload, str) and not payload.startswith("\ufeff"):
         payload = "\ufeff" + payload
 
-    blob.upload_from_string(
-        payload,
-        content_type=content_type,
+    _retry_io(
+        operation="upload_text",
+        target=destination_path,
+        fn=lambda: blob.upload_from_string(
+            payload,
+            content_type=content_type,
+        ),
     )
 
     signed_url = _signed_url(blob)
@@ -110,7 +165,11 @@ def upload_file(*, local_path: str, destination_path: str) -> dict:
     bucket = client.bucket(GCS_BUCKET)
     blob = bucket.blob(destination_path)
 
-    blob.upload_from_filename(local_path)
+    _retry_io(
+        operation="upload_file",
+        target=destination_path,
+        fn=lambda: blob.upload_from_filename(local_path),
+    )
 
     signed_url = _signed_url(blob)
 
@@ -146,8 +205,6 @@ def append_log(job_id: str, message: str):
 # ---------------------------------------------------------
 # DOWNLOAD FROM GCS (LOCAL)
 # ---------------------------------------------------------
-client = storage.Client()
-
 def download_from_gcs(gcs_uri: str) -> str:
     logger.info(f"GCS download started: gcs_uri={gcs_uri}")
 
@@ -155,7 +212,13 @@ def download_from_gcs(gcs_uri: str) -> str:
     bucket_name, blob_path = path.split("/", 1)
 
     local_path = f"/tmp/{os.path.basename(blob_path)}"
-    client.bucket(bucket_name).blob(blob_path).download_to_filename(local_path)
+    client = _get_client()
+    blob = client.bucket(bucket_name).blob(blob_path)
+    _retry_io(
+        operation="download",
+        target=gcs_uri,
+        fn=lambda: blob.download_to_filename(local_path),
+    )
 
     logger.info(f"GCS download completed: local_path={local_path}")
     return local_path
