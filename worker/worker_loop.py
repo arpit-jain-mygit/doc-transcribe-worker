@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from worker.cancel import JobCancelledError, is_cancelled
 from worker.contract import CONTRACT_VERSION
 from worker.error_catalog import classify_error
+from worker.json_logging import configure_json_logging
 from worker.startup_env import validate_startup_env
 
 # Load .env for local runs
@@ -18,13 +19,23 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 # =========================================================
 # LOGGING SETUP
 # =========================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [WORKER] %(levelname)s %(message)s",
-)
+level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+level = getattr(logging, level_name, logging.INFO)
+configure_json_logging(service="doc-transcribe-worker", level=level)
 logger = logging.getLogger("worker")
 validate_startup_env()
 from worker.dispatcher import dispatch
+
+
+def log_stage_event(*, job_id: str, request_id: str, stage: str, event: str, **extra):
+    payload = {
+        "job_id": job_id,
+        "request_id": request_id,
+        "stage": stage,
+        "event": event,
+    }
+    payload.update(extra)
+    logger.info("worker_stage_event", extra=payload)
 
 # =========================================================
 # CONFIG
@@ -213,6 +224,14 @@ while True:
         if request_id:
             logger.info(f"Parsed request_id={request_id}")
         logger.info(f"Job payload keys={list(job.keys())}")
+        log_stage_event(
+            job_id=job_id,
+            request_id=request_id,
+            stage="JOB_RECEIVED",
+            event="STARTED",
+            queue=queue,
+            source_label=source_label,
+        )
 
         current = r.hgetall(key)
         if current and (current.get("cancel_requested") == "1" or (current.get("status") or "").upper() == "CANCELLED"):
@@ -246,12 +265,20 @@ while True:
         )
 
         logger.info(f"Dispatch START job_id={job_id} request_id={request_id}")
+        log_stage_event(job_id=job_id, request_id=request_id, stage="DISPATCH", event="STARTED")
         dispatch_start = time.time()
 
         output = dispatch(job)
 
         duration = round(time.time() - dispatch_start, 2)
         logger.info(f"Dispatch END job_id={job_id} request_id={request_id} duration={duration}s output={output}")
+        log_stage_event(
+            job_id=job_id,
+            request_id=request_id,
+            stage="DISPATCH",
+            event="COMPLETED",
+            duration_sec=duration,
+        )
 
         current = r.hgetall(key)
         current_status = (current.get("status") or "").upper()
@@ -274,10 +301,12 @@ while True:
                 },
             )
         logger.info(f"Worker finished job {job_id} request_id={request_id}")
+        log_stage_event(job_id=job_id, request_id=request_id, stage="JOB_EXECUTION", event="COMPLETED")
         time.sleep(0.1)
 
     except JobCancelledError:
         logger.info(f"Job {job_id} cancelled during processing")
+        log_stage_event(job_id=job_id, request_id=request_id if "request_id" in locals() else "", stage="JOB_EXECUTION", event="CANCELLED")
         try:
             r.hset(
                 key,
@@ -300,6 +329,13 @@ while True:
 
     except Exception as e:
         logger.exception("Worker error")
+        log_stage_event(
+            job_id=job_id if "job_id" in locals() else "UNKNOWN",
+            request_id=request_id if "request_id" in locals() else "",
+            stage="JOB_EXECUTION",
+            event="FAILED",
+            error=f"{e.__class__.__name__}: {e}",
+        )
 
         try:
             if "job_id" in locals():
