@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta
 from google.cloud import storage
 import logging
+from worker.metrics import incr, observe_ms
 
 # ---------------------------------------------------------
 # CONFIG
@@ -50,9 +51,13 @@ GCS_BACKOFF_SEC = _env_float("GCS_BACKOFF_SEC", 0.5)
 
 
 def _retry_io(operation: str, target: str, fn):
+    start = time.perf_counter()
     for attempt in range(GCS_RETRIES + 1):
         try:
-            return fn()
+            out = fn()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            observe_ms("worker_gcs_io_latency_ms", elapsed_ms, operation=operation, retries=attempt)
+            return out
         except Exception as exc:
             logger.warning(
                 "gcs_io_retry op=%s attempt=%s/%s target=%s error=%s",
@@ -63,7 +68,9 @@ def _retry_io(operation: str, target: str, fn):
                 exc,
             )
             if attempt >= GCS_RETRIES:
+                incr("worker_gcs_retry_exhausted_total", operation=operation)
                 raise
+            incr("worker_gcs_retry_total", operation=operation)
             time.sleep(GCS_BACKOFF_SEC * (2 ** attempt))
 
 

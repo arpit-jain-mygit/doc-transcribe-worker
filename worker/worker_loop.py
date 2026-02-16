@@ -11,6 +11,7 @@ from worker.cancel import JobCancelledError, is_cancelled
 from worker.contract import CONTRACT_VERSION
 from worker.error_catalog import classify_error
 from worker.json_logging import configure_json_logging
+from worker.metrics import incr, observe_ms
 from worker.startup_env import validate_startup_env
 
 # Load .env for local runs
@@ -224,6 +225,7 @@ while True:
         if request_id:
             logger.info(f"Parsed request_id={request_id}")
         logger.info(f"Job payload keys={list(job.keys())}")
+        incr("worker_jobs_received_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
         log_stage_event(
             job_id=job_id,
             request_id=request_id,
@@ -271,6 +273,13 @@ while True:
         output = dispatch(job)
 
         duration = round(time.time() - dispatch_start, 2)
+        observe_ms(
+            "worker_dispatch_latency_ms",
+            duration * 1000.0,
+            queue=queue,
+            source=source_label,
+            job_type=job.get("job_type", "UNKNOWN"),
+        )
         logger.info(f"Dispatch END job_id={job_id} request_id={request_id} duration={duration}s output={output}")
         log_stage_event(
             job_id=job_id,
@@ -301,11 +310,13 @@ while True:
                 },
             )
         logger.info(f"Worker finished job {job_id} request_id={request_id}")
+        incr("worker_jobs_completed_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
         log_stage_event(job_id=job_id, request_id=request_id, stage="JOB_EXECUTION", event="COMPLETED")
         time.sleep(0.1)
 
     except JobCancelledError:
         logger.info(f"Job {job_id} cancelled during processing")
+        incr("worker_jobs_cancelled_total", queue=queue if "queue" in locals() else "UNKNOWN")
         log_stage_event(job_id=job_id, request_id=request_id if "request_id" in locals() else "", stage="JOB_EXECUTION", event="CANCELLED")
         try:
             r.hset(
@@ -329,6 +340,11 @@ while True:
 
     except Exception as e:
         logger.exception("Worker error")
+        incr(
+            "worker_jobs_failed_total",
+            queue=queue if "queue" in locals() else "UNKNOWN",
+            job_type=job.get("job_type", "UNKNOWN") if "job" in locals() and isinstance(job, dict) else "UNKNOWN",
+        )
         log_stage_event(
             job_id=job_id if "job_id" in locals() else "UNKNOWN",
             request_id=request_id if "request_id" in locals() else "",
