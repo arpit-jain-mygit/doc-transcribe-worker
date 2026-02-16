@@ -13,6 +13,9 @@ Disallowed direction:
 - executor owning queue polling lifecycle
 - adapter owning orchestration decisions
 
+## Canonical contract
+- Job status contract reference: `JOB_STATUS_CONTRACT.md`
+
 ## Current modules (as-is)
 - `worker/worker_loop.py`: queue poll and lifecycle updates
 - `worker/dispatcher.py`, `worker/jobs/processor.py`: routing to OCR/transcription

@@ -6,7 +6,10 @@ This guide explains how to run and validate `doc-transcribe-worker` locally and 
 
 `/Users/arpitjain/PycharmProjects/doc-transcribe-worker`
 
-## 2. What Worker Does
+## 2. Contract Reference
+- See `JOB_STATUS_CONTRACT.md` for canonical job field and status expectations.
+
+## 3. What Worker Does
 
 - Consumes queued jobs from Redis
 - Dispatches by job type:

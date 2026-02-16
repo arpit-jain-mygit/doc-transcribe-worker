@@ -1,5 +1,8 @@
 # Contributing (Worker)
 
+## Canonical contract
+- Job/status contract reference: `JOB_STATUS_CONTRACT.md`
+
 ## Architecture rule
 Follow `/ARCHITECTURE.md` boundaries before changing queue, dispatcher, OCR, or transcription code.
 
