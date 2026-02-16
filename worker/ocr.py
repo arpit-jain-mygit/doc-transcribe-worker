@@ -27,6 +27,7 @@ from vertexai.preview.generative_models import (
 )
 
 from worker.cancel import ensure_not_cancelled
+from worker.contract import CONTRACT_VERSION
 from worker.utils.gcs import download_from_gcs, upload_text
 
 # =========================================================
@@ -115,6 +116,7 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
     r.hset(
         f"job_status:{job_id}",
         mapping={
+            "contract_version": CONTRACT_VERSION,
             "status": status,
             "stage": stage,
             "progress": progress,
@@ -218,11 +220,16 @@ def run_ocr(job_id: str, job: dict) -> dict:
     r.hset(
         f"job_status:{job_id}",
         mapping={
+            "contract_version": CONTRACT_VERSION,
             "status": "COMPLETED",
             "stage": "Completed",
             "progress": 100,
             "output_path": uploaded["gcs_uri"],
             "output_filename": output_filename,
+            "error_code": "",
+            "error_message": "",
+            "error_detail": "",
+            "error": "",
             "updated_at": datetime.utcnow().isoformat(),
         },
     )

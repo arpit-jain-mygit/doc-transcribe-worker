@@ -26,6 +26,7 @@ from google.cloud import aiplatform
 from vertexai.preview.generative_models import GenerativeModel, Part
 
 from worker.cancel import ensure_not_cancelled
+from worker.contract import CONTRACT_VERSION
 from worker.utils.gcs import upload_text, download_from_gcs
 
 # =========================================================
@@ -137,6 +138,7 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
     safe_hset(
         f"job_status:{job_id}",
         {
+            "contract_version": CONTRACT_VERSION,
             "status": status,
             "stage": stage,
             "progress": progress,
@@ -267,11 +269,16 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
         safe_hset(
             f"job_status:{job_id}",
             {
+                "contract_version": CONTRACT_VERSION,
                 "status": "COMPLETED",
                 "stage": "Completed",
                 "progress": 100,
                 "output_path": upload["gcs_uri"],
                 "output_filename": output_filename,
+                "error_code": "",
+                "error_message": "",
+                "error_detail": "",
+                "error": "",
                 "updated_at": datetime.utcnow().isoformat(),
             },
         )

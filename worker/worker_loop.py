@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 
 from worker.cancel import JobCancelledError, is_cancelled
 from worker.dispatcher import dispatch
+from worker.contract import CONTRACT_VERSION
+from worker.error_catalog import classify_error
 
 # Load .env for local runs
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
@@ -213,9 +215,14 @@ while True:
             r.hset(
                 key,
                 mapping={
+                    "contract_version": CONTRACT_VERSION,
                     "status": "CANCELLED",
                     "stage": "Cancelled by user",
                     "updated_at": datetime.utcnow().isoformat(),
+                    "error_code": "CANCELLED_BY_USER",
+                    "error_message": "Job was cancelled by user.",
+                    "error_detail": "",
+                    "error": "Job was cancelled by user.",
                 },
             )
             continue
@@ -223,7 +230,9 @@ while True:
         r.hset(
             key,
             mapping={
+                "contract_version": CONTRACT_VERSION,
                 "status": "PROCESSING",
+                "stage": "Processing started",
                 "progress": 1,
                 "updated_at": datetime.utcnow().isoformat(),
             },
@@ -244,10 +253,16 @@ while True:
             r.hset(
                 key,
                 mapping={
+                    "contract_version": CONTRACT_VERSION,
                     "status": "COMPLETED",
+                    "stage": current.get("stage") or "Completed",
                     "progress": 100,
                     "updated_at": datetime.utcnow().isoformat(),
                     "duration_sec": duration,
+                    "error_code": "",
+                    "error_message": "",
+                    "error_detail": "",
+                    "error": "",
                 },
             )
         logger.info(f"Worker finished job {job_id}")
@@ -259,10 +274,15 @@ while True:
             r.hset(
                 key,
                 mapping={
+                    "contract_version": CONTRACT_VERSION,
                     "status": "CANCELLED",
                     "stage": "Cancelled by user",
                     "progress": 100,
                     "updated_at": datetime.utcnow().isoformat(),
+                    "error_code": "CANCELLED_BY_USER",
+                    "error_message": "Job was cancelled by user.",
+                    "error_detail": "",
+                    "error": "Job was cancelled by user.",
                 },
             )
         except Exception:
@@ -278,23 +298,35 @@ while True:
                     r.hset(
                         key,
                         mapping={
+                            "contract_version": CONTRACT_VERSION,
                             "status": "CANCELLED",
                             "stage": "Cancelled by user",
                             "updated_at": datetime.utcnow().isoformat(),
+                            "error_code": "CANCELLED_BY_USER",
+                            "error_message": "Job was cancelled by user.",
+                            "error_detail": "",
+                            "error": "Job was cancelled by user.",
                         },
                     )
                     logger.info(f"Job {job_id} cancelled (post-error path)")
                 else:
+                    error_code, error_message = classify_error(e)
+                    error_detail = f"{e.__class__.__name__}: {e}"
                     r.hset(
                         key,
                         mapping={
+                            "contract_version": CONTRACT_VERSION,
                             "status": "FAILED",
-                            "error": str(e),
+                            "stage": "Processing failed",
+                            "error_code": error_code,
+                            "error_message": error_message,
+                            "error_detail": error_detail,
+                            "error": error_message,
                             "updated_at": datetime.utcnow().isoformat(),
                         },
                     )
                     r.lpush(active_dlq if "active_dlq" in locals() else DLQ_NAME, job_raw)
-                    logger.error(f"Job {job_id} moved to DLQ")
+                    logger.error(f"Job {job_id} moved to DLQ error_code={error_code} detail={error_detail}")
         except Exception:
             logger.exception("Failure during error handling")
 
