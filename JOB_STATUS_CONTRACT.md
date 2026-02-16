@@ -4,11 +4,12 @@ Canonical source of truth:
 - API repo: `/Users/arpitjain/PycharmProjects/doc-transcribe-api/JOB_STATUS_CONTRACT.md`
 
 Contract version expected by worker:
-- `2026-02-16-prs-002`
+- `2026-02-16-prs-005`
 
 Worker contract responsibilities:
 - Read `job_type` from payload and route execution (`OCR` or `TRANSCRIPTION`).
 - Update canonical lifecycle fields during processing:
+  - `request_id`
   - `status`
   - `stage`
   - `progress`

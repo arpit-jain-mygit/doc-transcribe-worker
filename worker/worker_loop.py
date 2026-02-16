@@ -206,9 +206,12 @@ while True:
 
         job = json.loads(job_raw)
         job_id = job.get("job_id", "UNKNOWN")
+        request_id = str(job.get("request_id") or "").strip()
         key = f"job_status:{job_id}"
 
         logger.info(f"Parsed job_id={job_id}")
+        if request_id:
+            logger.info(f"Parsed request_id={request_id}")
         logger.info(f"Job payload keys={list(job.keys())}")
 
         current = r.hgetall(key)
@@ -218,6 +221,7 @@ while True:
                 key,
                 mapping={
                     "contract_version": CONTRACT_VERSION,
+                    "request_id": request_id,
                     "status": "CANCELLED",
                     "stage": "Cancelled by user",
                     "updated_at": datetime.utcnow().isoformat(),
@@ -233,6 +237,7 @@ while True:
             key,
             mapping={
                 "contract_version": CONTRACT_VERSION,
+                "request_id": request_id,
                 "status": "PROCESSING",
                 "stage": "Processing started",
                 "progress": 1,
@@ -240,13 +245,13 @@ while True:
             },
         )
 
-        logger.info(f"Dispatch START job_id={job_id}")
+        logger.info(f"Dispatch START job_id={job_id} request_id={request_id}")
         dispatch_start = time.time()
 
         output = dispatch(job)
 
         duration = round(time.time() - dispatch_start, 2)
-        logger.info(f"Dispatch END job_id={job_id} duration={duration}s output={output}")
+        logger.info(f"Dispatch END job_id={job_id} request_id={request_id} duration={duration}s output={output}")
 
         current = r.hgetall(key)
         current_status = (current.get("status") or "").upper()
@@ -256,6 +261,7 @@ while True:
                 key,
                 mapping={
                     "contract_version": CONTRACT_VERSION,
+                    "request_id": request_id,
                     "status": "COMPLETED",
                     "stage": current.get("stage") or "Completed",
                     "progress": 100,
@@ -267,7 +273,7 @@ while True:
                     "error": "",
                 },
             )
-        logger.info(f"Worker finished job {job_id}")
+        logger.info(f"Worker finished job {job_id} request_id={request_id}")
         time.sleep(0.1)
 
     except JobCancelledError:
@@ -277,6 +283,7 @@ while True:
                 key,
                 mapping={
                     "contract_version": CONTRACT_VERSION,
+                    "request_id": request_id,
                     "status": "CANCELLED",
                     "stage": "Cancelled by user",
                     "progress": 100,
@@ -301,6 +308,7 @@ while True:
                         key,
                         mapping={
                             "contract_version": CONTRACT_VERSION,
+                            "request_id": request_id,
                             "status": "CANCELLED",
                             "stage": "Cancelled by user",
                             "updated_at": datetime.utcnow().isoformat(),
@@ -318,6 +326,7 @@ while True:
                         key,
                         mapping={
                             "contract_version": CONTRACT_VERSION,
+                            "request_id": request_id,
                             "status": "FAILED",
                             "stage": "Processing failed",
                             "error_code": error_code,
@@ -328,7 +337,13 @@ while True:
                         },
                     )
                     r.lpush(active_dlq if "active_dlq" in locals() else DLQ_NAME, job_raw)
-                    logger.error(f"Job {job_id} moved to DLQ error_code={error_code} detail={error_detail}")
+                    logger.error(
+                        "Job %s request_id=%s moved to DLQ error_code=%s detail=%s",
+                        job_id,
+                        request_id,
+                        error_code,
+                        error_detail,
+                    )
         except Exception:
             logger.exception("Failure during error handling")
 
