@@ -8,9 +8,9 @@ import redis
 from dotenv import load_dotenv
 
 from worker.cancel import JobCancelledError, is_cancelled
-from worker.dispatcher import dispatch
 from worker.contract import CONTRACT_VERSION
 from worker.error_catalog import classify_error
+from worker.startup_env import validate_startup_env
 
 # Load .env for local runs
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
@@ -23,6 +23,8 @@ logging.basicConfig(
     format="%(asctime)s [WORKER] %(levelname)s %(message)s",
 )
 logger = logging.getLogger("worker")
+validate_startup_env()
+from worker.dispatcher import dispatch
 
 # =========================================================
 # CONFIG
