@@ -11,6 +11,7 @@ from worker.cancel import JobCancelledError, is_cancelled
 from worker.contract import CONTRACT_VERSION
 from worker.status_machine import guarded_hset
 from worker.error_catalog import classify_error
+from worker.dead_letter import build_dead_letter_entry
 from worker.json_logging import configure_json_logging
 from worker.metrics import incr, observe_ms
 from worker.startup_env import validate_startup_env
@@ -161,6 +162,8 @@ logger.info("Starting worker")
 logger.info(f"REDIS_URL={REDIS_URL}")
 logger.info(f"QUEUE_MODE={QUEUE_MODE}")
 logger.info(f"QUEUE_TARGETS={queue_targets()}")
+worker_identity = f"{socket.gethostname()}:{os.getpid()}"
+logger.info("WORKER_ID=%s", worker_identity)
 
 r = connect_redis()
 
@@ -399,6 +402,8 @@ while True:
                 else:
                     error_code, error_message = classify_error(e)
                     error_detail = f"{e.__class__.__name__}: {e}"
+                    latest = r.hgetall(key) if key else {}
+                    failed_stage = (latest.get("stage") or "Processing failed").strip()
                     ok, prev_status, _ = guarded_hset(
                         r,
                         key=key,
@@ -418,13 +423,47 @@ while True:
                     )
                     if not ok:
                         logger.warning("Failed status update blocked job_id=%s from=%s", job_id, prev_status)
-                    r.lpush(active_dlq if "active_dlq" in locals() else DLQ_NAME, job_raw)
+                    target_dlq = active_dlq if "active_dlq" in locals() else DLQ_NAME
+                    dlq_payload = build_dead_letter_entry(
+                        job=job,
+                        queue_name=queue if "queue" in locals() else "UNKNOWN",
+                        dlq_name=target_dlq,
+                        source_label=source_label if "source_label" in locals() else "UNKNOWN",
+                        error_code=error_code,
+                        error_message=error_message,
+                        error_detail=error_detail,
+                        failed_stage=failed_stage,
+                        worker_id=worker_identity,
+                    )
+                    log_stage_event(
+                        job_id=job_id,
+                        request_id=request_id,
+                        stage="DLQ_ENQUEUE",
+                        event="STARTED",
+                        dlq_name=target_dlq,
+                        error_code=error_code,
+                    )
+                    r.lpush(target_dlq, json.dumps(dlq_payload, ensure_ascii=False))
+                    log_stage_event(
+                        job_id=job_id,
+                        request_id=request_id,
+                        stage="DLQ_ENQUEUE",
+                        event="COMPLETED",
+                        dlq_name=target_dlq,
+                        error_code=error_code,
+                        attempts=dlq_payload.get("attempts"),
+                        max_attempts=dlq_payload.get("max_attempts"),
+                    )
                     logger.error(
-                        "Job %s request_id=%s moved to DLQ error_code=%s detail=%s",
+                        "Job %s request_id=%s moved to DLQ=%s error_code=%s stage=%s detail=%s attempts=%s/%s",
                         job_id,
                         request_id,
+                        target_dlq,
                         error_code,
+                        failed_stage,
                         error_detail,
+                        dlq_payload.get("attempts"),
+                        dlq_payload.get("max_attempts"),
                     )
         except Exception:
             logger.exception("Failure during error handling")
