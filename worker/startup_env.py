@@ -70,15 +70,26 @@ def validate_startup_env() -> None:
     _validate_int_range("OCR_PAGE_BATCH_SIZE", errors, min_value=0, max_value=500)
 
     queue_mode = (os.getenv("QUEUE_MODE", "single") or "single").strip().lower()
-    if queue_mode not in {"single", "both"}:
-        errors.append("QUEUE_MODE must be either 'single' or 'both'")
+    if queue_mode not in {"single", "both", "partitioned"}:
+        errors.append("QUEUE_MODE must be one of 'single', 'both', 'partitioned'")
     elif queue_mode == "single":
         _require_keys(["QUEUE_NAME", "DLQ_NAME"], errors)
-    else:
+    elif queue_mode == "both":
         _require_keys(
             ["LOCAL_QUEUE_NAME", "LOCAL_DLQ_NAME", "CLOUD_QUEUE_NAME", "CLOUD_DLQ_NAME"],
             errors,
         )
+    else:
+        _require_keys(
+            ["OCR_QUEUE_NAME", "OCR_DLQ_NAME", "TRANSCRIPTION_QUEUE_NAME", "TRANSCRIPTION_DLQ_NAME"],
+            errors,
+        )
+
+    _validate_int_range("WORKER_MAX_INFLIGHT_OCR", errors, min_value=0, max_value=100)
+    _validate_int_range("WORKER_MAX_INFLIGHT_TRANSCRIPTION", errors, min_value=0, max_value=100)
+    _validate_int_range("RETRY_BUDGET_TRANSIENT", errors, min_value=0, max_value=10)
+    _validate_int_range("RETRY_BUDGET_MEDIA", errors, min_value=0, max_value=10)
+    _validate_int_range("RETRY_BUDGET_DEFAULT", errors, min_value=0, max_value=10)
 
     if _is_blank(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")):
         warnings.append(

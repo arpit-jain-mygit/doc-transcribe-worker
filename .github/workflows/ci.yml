@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  worker-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_*_unit.py"
+      - name: Contract sanity
+        run: |
+          python - <<'PY'
+          from worker.contract import CONTRACT_VERSION, JOB_TYPES, JOB_STATUSES
+          assert CONTRACT_VERSION
+          assert set(JOB_TYPES) == {"OCR", "TRANSCRIPTION"}
+          assert "FAILED" in JOB_STATUSES and "CANCELLED" in JOB_STATUSES
+          print("contract_sanity=ok")
+          PY

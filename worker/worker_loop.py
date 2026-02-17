@@ -59,6 +59,16 @@ CLOUD_QUEUE_NAME = os.getenv("CLOUD_QUEUE_NAME", "doc_jobs")
 CLOUD_DLQ_NAME = os.getenv("CLOUD_DLQ_NAME", "doc_jobs_dead")
 LOCAL_QUEUE_NAME = os.getenv("LOCAL_QUEUE_NAME", "doc_jobs_local")
 LOCAL_DLQ_NAME = os.getenv("LOCAL_DLQ_NAME", "doc_jobs_local_dead")
+OCR_QUEUE_NAME = os.getenv("OCR_QUEUE_NAME", "doc_jobs_ocr")
+OCR_DLQ_NAME = os.getenv("OCR_DLQ_NAME", "doc_jobs_ocr_dead")
+TRANSCRIPTION_QUEUE_NAME = os.getenv("TRANSCRIPTION_QUEUE_NAME", "doc_jobs_transcription")
+TRANSCRIPTION_DLQ_NAME = os.getenv("TRANSCRIPTION_DLQ_NAME", "doc_jobs_transcription_dead")
+
+WORKER_MAX_INFLIGHT_OCR = int(os.getenv("WORKER_MAX_INFLIGHT_OCR", "1"))
+WORKER_MAX_INFLIGHT_TRANSCRIPTION = int(os.getenv("WORKER_MAX_INFLIGHT_TRANSCRIPTION", "1"))
+RETRY_BUDGET_TRANSIENT = int(os.getenv("RETRY_BUDGET_TRANSIENT", "2"))
+RETRY_BUDGET_MEDIA = int(os.getenv("RETRY_BUDGET_MEDIA", "0"))
+RETRY_BUDGET_DEFAULT = int(os.getenv("RETRY_BUDGET_DEFAULT", "0"))
 
 BRPOP_TIMEOUT = 10              # seconds
 MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
@@ -70,16 +80,19 @@ MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
 def queue_targets() -> list[str]:
     if QUEUE_MODE == "both":
         targets = [LOCAL_QUEUE_NAME, CLOUD_QUEUE_NAME]
-        # Keep order stable while deduplicating
-        seen = set()
-        ordered = []
-        for q in targets:
-            if q and q not in seen:
-                seen.add(q)
-                ordered.append(q)
-        return ordered
+    elif QUEUE_MODE == "partitioned":
+        targets = [OCR_QUEUE_NAME, TRANSCRIPTION_QUEUE_NAME]
+    else:
+        targets = [QUEUE_NAME]
 
-    return [QUEUE_NAME]
+    # Keep order stable while deduplicating
+    seen = set()
+    ordered = []
+    for q in targets:
+        if q and q not in seen:
+            seen.add(q)
+            ordered.append(q)
+    return ordered
 
 
 def dlq_for_queue(queue: str) -> str:
@@ -88,6 +101,11 @@ def dlq_for_queue(queue: str) -> str:
             return CLOUD_DLQ_NAME
         if queue == LOCAL_QUEUE_NAME:
             return LOCAL_DLQ_NAME
+    if QUEUE_MODE == "partitioned":
+        if queue == OCR_QUEUE_NAME:
+            return OCR_DLQ_NAME
+        if queue == TRANSCRIPTION_QUEUE_NAME:
+            return TRANSCRIPTION_DLQ_NAME
     return DLQ_NAME
 
 
@@ -98,7 +116,40 @@ def queue_source_label(queue: str) -> str:
         if queue == LOCAL_QUEUE_NAME:
             return "LOCAL"
         return "UNKNOWN"
+    if QUEUE_MODE == "partitioned":
+        if queue == OCR_QUEUE_NAME:
+            return "OCR"
+        if queue == TRANSCRIPTION_QUEUE_NAME:
+            return "TRANSCRIPTION"
+        return "UNKNOWN"
     return "SINGLE"
+
+
+def _job_type(job: dict) -> str:
+    return str(job.get("job_type") or job.get("type") or "").upper()
+
+
+def inflight_limit_for(job_type: str) -> int:
+    if job_type == "OCR":
+        return max(0, WORKER_MAX_INFLIGHT_OCR)
+    if job_type == "TRANSCRIPTION":
+        return max(0, WORKER_MAX_INFLIGHT_TRANSCRIPTION)
+    return 1
+
+
+def inflight_set_key(job_type: str) -> str:
+    jt = job_type if job_type in {"OCR", "TRANSCRIPTION"} else "OTHER"
+    return f"worker:inflight:{jt}"
+
+
+def should_retry(error_code: str, attempts: int) -> tuple[bool, int]:
+    if error_code in {"INFRA_REDIS", "INFRA_GCS", "RATE_LIMIT_EXCEEDED"}:
+        budget = RETRY_BUDGET_TRANSIENT
+    elif error_code in {"MEDIA_DECODE_FAILED", "INPUT_NOT_FOUND"}:
+        budget = RETRY_BUDGET_MEDIA
+    else:
+        budget = RETRY_BUDGET_DEFAULT
+    return attempts < budget, budget
 
 
 # =========================================================
@@ -162,6 +213,14 @@ logger.info("Starting worker")
 logger.info(f"REDIS_URL={REDIS_URL}")
 logger.info(f"QUEUE_MODE={QUEUE_MODE}")
 logger.info(f"QUEUE_TARGETS={queue_targets()}")
+logger.info(
+    "WORKER_CONCURRENCY_LIMITS ocr=%s transcription=%s retry_budget_transient=%s retry_budget_media=%s retry_budget_default=%s",
+    WORKER_MAX_INFLIGHT_OCR,
+    WORKER_MAX_INFLIGHT_TRANSCRIPTION,
+    RETRY_BUDGET_TRANSIENT,
+    RETRY_BUDGET_MEDIA,
+    RETRY_BUDGET_DEFAULT,
+)
 worker_identity = f"{socket.gethostname()}:{os.getpid()}"
 logger.info("WORKER_ID=%s", worker_identity)
 
@@ -229,6 +288,38 @@ while True:
         if request_id:
             logger.info(f"Parsed request_id={request_id}")
         logger.info(f"Job payload keys={list(job.keys())}")
+        job_type = _job_type(job)
+        current_attempt = int(job.get("attempts", 0) or 0)
+        max_allowed = inflight_limit_for(job_type)
+        inflight_key = inflight_set_key(job_type)
+        if max_allowed <= 0:
+            logger.warning(
+                "Job %s blocked by zero inflight limit for type=%s queue=%s; requeueing",
+                job_id,
+                job_type,
+                queue,
+            )
+            r.rpush(queue, job_raw)
+            time.sleep(0.25)
+            continue
+        try:
+            inflight_now = int(r.scard(inflight_key) or 0)
+        except Exception:
+            inflight_now = 0
+        if inflight_now >= max_allowed:
+            logger.info(
+                "inflight_limit_hit type=%s limit=%s current=%s queue=%s job_id=%s requeue=true",
+                job_type,
+                max_allowed,
+                inflight_now,
+                queue,
+                job_id,
+            )
+            r.rpush(queue, job_raw)
+            time.sleep(0.25)
+            continue
+        r.sadd(inflight_key, job_id)
+        r.expire(inflight_key, 86400)
         incr("worker_jobs_received_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
         log_stage_event(
             job_id=job_id,
@@ -328,12 +419,21 @@ while True:
             if not ok:
                 logger.warning("Completion status update blocked job_id=%s from=%s", job_id, prev_status)
         logger.info(f"Worker finished job {job_id} request_id={request_id}")
+        try:
+            r.srem(inflight_set_key(job_type), job_id)
+        except Exception:
+            logger.warning("Failed to clear inflight marker job_id=%s job_type=%s", job_id, job_type)
         incr("worker_jobs_completed_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
         log_stage_event(job_id=job_id, request_id=request_id, stage="JOB_EXECUTION", event="COMPLETED")
         time.sleep(0.1)
 
     except JobCancelledError:
         logger.info(f"Job {job_id} cancelled during processing")
+        try:
+            jt = _job_type(job) if "job" in locals() and isinstance(job, dict) else "OTHER"
+            r.srem(inflight_set_key(jt), job_id)
+        except Exception:
+            logger.warning("Failed to clear inflight marker for cancelled job_id=%s", job_id if "job_id" in locals() else "UNKNOWN")
         incr("worker_jobs_cancelled_total", queue=queue if "queue" in locals() else "UNKNOWN")
         log_stage_event(job_id=job_id, request_id=request_id if "request_id" in locals() else "", stage="JOB_EXECUTION", event="CANCELLED")
         try:
@@ -363,6 +463,12 @@ while True:
 
     except Exception as e:
         logger.exception("Worker error")
+        try:
+            if "job_id" in locals():
+                jt = _job_type(job) if "job" in locals() and isinstance(job, dict) else "OTHER"
+                r.srem(inflight_set_key(jt), job_id)
+        except Exception:
+            logger.warning("Failed to clear inflight marker for failed job_id=%s", job_id if "job_id" in locals() else "UNKNOWN")
         incr(
             "worker_jobs_failed_total",
             queue=queue if "queue" in locals() else "UNKNOWN",
@@ -404,6 +510,44 @@ while True:
                     error_detail = f"{e.__class__.__name__}: {e}"
                     latest = r.hgetall(key) if key else {}
                     failed_stage = (latest.get("stage") or "Processing failed").strip()
+                    retry_allowed, retry_budget = should_retry(error_code, current_attempt if "current_attempt" in locals() else 0)
+                    if retry_allowed:
+                        next_attempt = (current_attempt if "current_attempt" in locals() else 0) + 1
+                        backoff = min(5.0, 0.5 * (2 ** max(0, next_attempt - 1)))
+                        ok, prev_status, _ = guarded_hset(
+                            r,
+                            key=key,
+                            mapping={
+                                "contract_version": CONTRACT_VERSION,
+                                "request_id": request_id,
+                                "status": "QUEUED",
+                                "stage": f"Retry scheduled ({next_attempt}/{retry_budget})",
+                                "updated_at": datetime.utcnow().isoformat(),
+                                "error_code": error_code,
+                                "error_message": error_message,
+                                "error_detail": error_detail,
+                                "error": error_message,
+                            },
+                            context="WORKER_RETRY_REQUEUE",
+                            request_id=request_id,
+                        )
+                        if not ok:
+                            logger.warning("Retry status update blocked job_id=%s from=%s", job_id, prev_status)
+                        retry_payload = dict(job)
+                        retry_payload["attempts"] = next_attempt
+                        retry_payload["max_attempts"] = retry_budget
+                        logger.warning(
+                            "Retrying job_id=%s request_id=%s error_code=%s attempt=%s/%s backoff_sec=%.2f",
+                            job_id,
+                            request_id,
+                            error_code,
+                            next_attempt,
+                            retry_budget,
+                            backoff,
+                        )
+                        time.sleep(backoff)
+                        r.rpush(queue if "queue" in locals() else QUEUE_NAME, json.dumps(retry_payload, ensure_ascii=False))
+                        continue
                     ok, prev_status, _ = guarded_hset(
                         r,
                         key=key,
