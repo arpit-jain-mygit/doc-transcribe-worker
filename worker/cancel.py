@@ -1,7 +1,8 @@
 import logging
 import os
-import time
 import redis
+
+from worker.utils.retry_policy import REDIS_POLICY, run_with_retry
 
 
 logger = logging.getLogger("worker.cancel")
@@ -25,31 +26,48 @@ def _redis_client() -> redis.Redis:
 
 
 def is_cancelled(job_id: str, r: redis.Redis | None = None, retries: int = 2) -> bool:
-    # Cancellation checks should not fail a running job on transient Redis drops.
-    # Retry with fresh connections; if still unavailable, continue as "not cancelled".
-    for attempt in range(retries + 1):
-        rc = r if attempt == 0 and r is not None else _redis_client()
-        try:
-            data = rc.hgetall(f"job_status:{job_id}")
-            if not data:
-                return False
-            return data.get("cancel_requested") == "1" or (data.get("status") or "").upper() == "CANCELLED"
-        except redis.exceptions.ConnectionError as exc:
-            logger.warning(
-                "cancel_check_redis_connection_error job_id=%s attempt=%s/%s error=%s",
-                job_id,
-                attempt + 1,
-                retries + 1,
-                exc,
-            )
-            time.sleep(0.15)
-            continue
+    # Backward-compatible parameter: if explicit retries provided, override policy.
+    policy = REDIS_POLICY
+    if retries != REDIS_POLICY.max_retries:
+        policy = type(REDIS_POLICY)(
+            name=REDIS_POLICY.name,
+            max_retries=max(0, retries),
+            base_delay_sec=REDIS_POLICY.base_delay_sec,
+            max_delay_sec=REDIS_POLICY.max_delay_sec,
+            jitter_ratio=REDIS_POLICY.jitter_ratio,
+        )
 
-    logger.warning(
-        "cancel_check_redis_unavailable job_id=%s action=continue_processing",
-        job_id,
-    )
-    return False
+    def _read_cancel_state() -> bool:
+        rc = r if r is not None else _redis_client()
+        data = rc.hgetall(f"job_status:{job_id}")
+        if not data:
+            return False
+        return data.get("cancel_requested") == "1" or (data.get("status") or "").upper() == "CANCELLED"
+
+    def _on_retry(attempt: int, exc: BaseException) -> None:
+        logger.warning(
+            "cancel_check_redis_connection_error job_id=%s attempt=%s/%s error=%s",
+            job_id,
+            attempt,
+            policy.max_retries,
+            exc,
+        )
+
+    try:
+        return run_with_retry(
+            operation="cancel_check",
+            target=job_id,
+            fn=_read_cancel_state,
+            retryable=(redis.exceptions.ConnectionError, redis.exceptions.TimeoutError),
+            policy=policy,
+            on_retry=_on_retry,
+        )
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
+        logger.warning(
+            "cancel_check_redis_unavailable job_id=%s action=continue_processing",
+            job_id,
+        )
+        return False
 
 
 def ensure_not_cancelled(job_id: str, r: redis.Redis | None = None):

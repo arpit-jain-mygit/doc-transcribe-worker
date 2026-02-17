@@ -29,6 +29,7 @@ from worker.cancel import ensure_not_cancelled
 from worker.contract import CONTRACT_VERSION
 from worker.utils.gcs import upload_text, download_from_gcs
 from worker.status_machine import guarded_hset
+from worker.utils.retry_policy import REDIS_POLICY, run_with_retry
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -86,23 +87,40 @@ def get_redis():
 # REDIS SAFE WRITE
 # =========================================================
 def safe_hset(key: str, mapping: dict, retries: int = 1):
-    for attempt in range(retries + 1):
-        try:
-            r = get_redis()
-            ok, current_status, _ = guarded_hset(
-                r,
-                key=key,
-                mapping=mapping,
-                context="TRANSCRIBE_SAFE_HSET",
-                request_id=str(mapping.get("request_id") or ""),
-            )
-            if not ok:
-                log(f"Blocked status transition key={key} from={current_status} to={mapping.get('status')}")
-            return
-        except redis.exceptions.ConnectionError as e:
-            log(f"Redis HSET failed (attempt {attempt + 1}): {e}")
-            if attempt >= retries:
-                raise
+    policy = REDIS_POLICY
+    if retries != REDIS_POLICY.max_retries:
+        policy = type(REDIS_POLICY)(
+            name=REDIS_POLICY.name,
+            max_retries=max(0, retries),
+            base_delay_sec=REDIS_POLICY.base_delay_sec,
+            max_delay_sec=REDIS_POLICY.max_delay_sec,
+            jitter_ratio=REDIS_POLICY.jitter_ratio,
+        )
+
+    def _write_once():
+        r = get_redis()
+        ok, current_status, _ = guarded_hset(
+            r,
+            key=key,
+            mapping=mapping,
+            context="TRANSCRIBE_SAFE_HSET",
+            request_id=str(mapping.get("request_id") or ""),
+        )
+        if not ok:
+            log(f"Blocked status transition key={key} from={current_status} to={mapping.get('status')}")
+        return None
+
+    def _on_retry(attempt: int, exc: BaseException) -> None:
+        log(f"Redis HSET retry key={key} attempt={attempt}/{policy.max_retries} error={exc}")
+
+    run_with_retry(
+        operation="redis_hset",
+        target=key,
+        fn=_write_once,
+        retryable=(redis.exceptions.ConnectionError, redis.exceptions.TimeoutError),
+        policy=policy,
+        on_retry=_on_retry,
+    )
 
 # =========================================================
 # INIT VERTEX

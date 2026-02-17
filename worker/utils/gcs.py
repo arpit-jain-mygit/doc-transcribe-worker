@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from google.cloud import storage
 import logging
 from worker.metrics import incr, observe_ms
+from worker.utils.retry_policy import GCS_POLICY, run_with_retry
 
 # ---------------------------------------------------------
 # CONFIG
@@ -22,56 +23,39 @@ _client = None
 logger = logging.getLogger(__name__)
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%s, using default=%s", name, raw, default)
-        return default
-    return max(0, value)
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%s, using default=%s", name, raw, default)
-        return default
-    return max(0.0, value)
-
-
-GCS_RETRIES = _env_int("GCS_RETRIES", 3)
-GCS_BACKOFF_SEC = _env_float("GCS_BACKOFF_SEC", 0.5)
-
-
 def _retry_io(operation: str, target: str, fn):
     start = time.perf_counter()
-    for attempt in range(GCS_RETRIES + 1):
-        try:
-            out = fn()
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            observe_ms("worker_gcs_io_latency_ms", elapsed_ms, operation=operation, retries=attempt)
-            return out
-        except Exception as exc:
-            logger.warning(
-                "gcs_io_retry op=%s attempt=%s/%s target=%s error=%s",
-                operation,
-                attempt + 1,
-                GCS_RETRIES + 1,
-                target,
-                exc,
-            )
-            if attempt >= GCS_RETRIES:
-                incr("worker_gcs_retry_exhausted_total", operation=operation)
-                raise
-            incr("worker_gcs_retry_total", operation=operation)
-            time.sleep(GCS_BACKOFF_SEC * (2 ** attempt))
+
+    attempt = 0
+
+    def _on_retry(next_attempt: int, exc: BaseException) -> None:
+        nonlocal attempt
+        attempt = next_attempt
+        logger.warning(
+            "gcs_io_retry op=%s attempt=%s/%s target=%s error=%s",
+            operation,
+            next_attempt,
+            GCS_POLICY.max_retries,
+            target,
+            exc,
+        )
+        incr("worker_gcs_retry_total", operation=operation)
+
+    try:
+        out = run_with_retry(
+            operation=operation,
+            target=target,
+            fn=fn,
+            retryable=(Exception,),
+            policy=GCS_POLICY,
+            on_retry=_on_retry,
+        )
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        observe_ms("worker_gcs_io_latency_ms", elapsed_ms, operation=operation, retries=attempt)
+        return out
+    except Exception:
+        incr("worker_gcs_retry_exhausted_total", operation=operation)
+        raise
 
 
 def _get_client():
@@ -113,7 +97,7 @@ def _signed_url(blob, expires_days: int = 7) -> str:
 
 
 # ---------------------------------------------------------
-# ✅ PUBLIC SIGNED URL (FIXES IMPORT ERROR)
+# PUBLIC SIGNED URL
 # ---------------------------------------------------------
 def generate_signed_url(
     bucket_name: str,

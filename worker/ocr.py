@@ -30,6 +30,7 @@ from worker.cancel import ensure_not_cancelled
 from worker.contract import CONTRACT_VERSION
 from worker.utils.gcs import download_from_gcs, upload_text
 from worker.status_machine import guarded_hset
+from worker.utils.retry_policy import REDIS_POLICY, run_with_retry
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -116,24 +117,48 @@ def normalize_output_filename(raw_name: str | None) -> str:
 
 
 def safe_hset(key: str, mapping: dict, retries: int = 1):
-    for attempt in range(retries + 1):
-        try:
-            rc = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_keepalive=True, socket_connect_timeout=2, socket_timeout=10, retry_on_timeout=True, health_check_interval=15)
-            ok, current_status, _ = guarded_hset(
-                rc,
-                key=key,
-                mapping=mapping,
-                context="OCR_SAFE_HSET",
-                request_id=str(mapping.get("request_id") or ""),
-            )
-            if not ok:
-                logger.warning("ocr_status_transition_blocked key=%s from=%s to=%s", key, current_status, mapping.get("status"))
-            return
-        except redis.exceptions.ConnectionError as exc:
-            logger.warning("ocr_safe_hset_connection_error attempt=%s/%s error=%s", attempt + 1, retries + 1, exc)
-            if attempt >= retries:
-                raise
-            time.sleep(0.15)
+    policy = REDIS_POLICY
+    if retries != REDIS_POLICY.max_retries:
+        policy = type(REDIS_POLICY)(
+            name=REDIS_POLICY.name,
+            max_retries=max(0, retries),
+            base_delay_sec=REDIS_POLICY.base_delay_sec,
+            max_delay_sec=REDIS_POLICY.max_delay_sec,
+            jitter_ratio=REDIS_POLICY.jitter_ratio,
+        )
+
+    def _write_once():
+        rc = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_keepalive=True,
+            socket_connect_timeout=2,
+            socket_timeout=10,
+            retry_on_timeout=True,
+            health_check_interval=15,
+        )
+        ok, current_status, _ = guarded_hset(
+            rc,
+            key=key,
+            mapping=mapping,
+            context="OCR_SAFE_HSET",
+            request_id=str(mapping.get("request_id") or ""),
+        )
+        if not ok:
+            logger.warning("ocr_status_transition_blocked key=%s from=%s to=%s", key, current_status, mapping.get("status"))
+        return None
+
+    def _on_retry(attempt: int, exc: BaseException) -> None:
+        logger.warning("ocr_safe_hset_retry key=%s attempt=%s/%s error=%s", key, attempt, policy.max_retries, exc)
+
+    run_with_retry(
+        operation="redis_hset",
+        target=key,
+        fn=_write_once,
+        retryable=(redis.exceptions.ConnectionError, redis.exceptions.TimeoutError),
+        policy=policy,
+        on_retry=_on_retry,
+    )
 
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING", eta_sec: int = 0):
     safe_hset(
