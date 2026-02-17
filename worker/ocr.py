@@ -53,7 +53,7 @@ MODEL_NAME = "gemini-2.5-flash"
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports _env_int so the OCR/transcription journey stays clear and reliable.
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -88,7 +88,7 @@ model = GenerativeModel(MODEL_NAME)
 logger = logging.getLogger("worker.ocr")
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports log so the OCR/transcription journey stays clear and reliable.
 def log(msg: str):
     logger.info("[OCR %s] %s", datetime.utcnow().isoformat(), msg)
 
@@ -112,14 +112,14 @@ Rules (STRICT):
 # =========================================================
 # UTILS
 # =========================================================
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports pil_to_png_bytes so the OCR/transcription journey stays clear and reliable.
 def pil_to_png_bytes(image: Image.Image) -> bytes:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports sanitize_filename so the OCR/transcription journey stays clear and reliable.
 def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = unicodedata.normalize("NFKC", name)
     name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
@@ -128,7 +128,7 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     return name[:max_len]
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: normalizes data so users see consistent OCR/transcription results.
 def normalize_output_filename(raw_name: str | None) -> str:
     stem, _ = os.path.splitext(raw_name or "transcript")
     return f"{sanitize_filename(stem)}.txt"
@@ -136,7 +136,7 @@ def normalize_output_filename(raw_name: str | None) -> str:
 
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports iter_pdf_pages so the OCR/transcription journey stays clear and reliable.
 def iter_pdf_pages(input_path: str):
     if OCR_PAGE_BATCH_SIZE <= 0:
         pages = convert_from_path(input_path, dpi=OCR_DPI)
@@ -159,7 +159,7 @@ def iter_pdf_pages(input_path: str):
         yield first_page, pages, total_pages
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports safe_hset so the OCR/transcription journey stays clear and reliable.
 def safe_hset(key: str, mapping: dict, retries: int = 1):
     policy = REDIS_POLICY
     if retries != REDIS_POLICY.max_retries:
@@ -171,7 +171,7 @@ def safe_hset(key: str, mapping: dict, retries: int = 1):
             jitter_ratio=REDIS_POLICY.jitter_ratio,
         )
 
-    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
+    # User value: supports _write_once so the OCR/transcription journey stays clear and reliable.
     def _write_once():
         rc = redis.Redis.from_url(
             REDIS_URL,
@@ -193,7 +193,7 @@ def safe_hset(key: str, mapping: dict, retries: int = 1):
             logger.warning("ocr_status_transition_blocked key=%s from=%s to=%s", key, current_status, mapping.get("status"))
         return None
 
-    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
+    # User value: improves reliability when OCR/transcription dependencies fail transiently.
     def _on_retry(attempt: int, exc: BaseException) -> None:
         logger.warning("ocr_safe_hset_retry key=%s attempt=%s/%s error=%s", key, attempt, policy.max_retries, exc)
 
@@ -206,7 +206,7 @@ def safe_hset(key: str, mapping: dict, retries: int = 1):
         on_retry=_on_retry,
     )
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: updates user-visible OCR/transcription state accurately.
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING", eta_sec: int = 0):
     safe_hset(
         f"job_status:{job_id}",
@@ -223,7 +223,7 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
 # =========================================================
 # GEMINI OCR
 # =========================================================
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports gemini_ocr so the OCR/transcription journey stays clear and reliable.
 def gemini_ocr(image: Image.Image, page_num: int) -> str:
     png_bytes = pil_to_png_bytes(image)
     vertex_image = VertexImage.from_bytes(png_bytes)
@@ -254,7 +254,7 @@ def gemini_ocr(image: Image.Image, page_num: int) -> str:
 # =========================================================
 # WORKER ENTRYPOINT
 # =========================================================
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports run_ocr so the OCR/transcription journey stays clear and reliable.
 def run_ocr(job_id: str, job: dict) -> dict:
     ensure_not_cancelled(job_id, r=r)
     input_path = job.get("input_path")

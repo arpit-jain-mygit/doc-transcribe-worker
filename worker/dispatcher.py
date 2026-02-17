@@ -2,7 +2,7 @@
 from worker.orchestrator.router import execute_job
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: routes work so user OCR/transcription jobs are processed correctly.
 def dispatch(job: dict):
     job_id = job.get("job_id")
     if not job_id:

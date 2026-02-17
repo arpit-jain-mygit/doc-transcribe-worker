@@ -7,7 +7,7 @@ import redis
 from google.cloud import storage
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: prevents invalid input so users get reliable OCR/transcription outcomes.
 def check() -> dict:
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     bucket_name = os.getenv("GCS_BUCKET_NAME", "")

@@ -10,7 +10,7 @@ _COUNTERS: dict[str, int] = {}
 _TIMERS: dict[str, dict[str, float]] = {}
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports _tagged_name so the OCR/transcription journey stays clear and reliable.
 def _tagged_name(name: str, tags: dict[str, str]) -> str:
     if not tags:
         return name
@@ -20,7 +20,7 @@ def _tagged_name(name: str, tags: dict[str, str]) -> str:
     return f"{name}|{'|'.join(parts)}"
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports incr so the OCR/transcription journey stays clear and reliable.
 def incr(name: str, amount: int = 1, **tags) -> None:
     metric = _tagged_name(name, {k: str(v) for k, v in tags.items()})
     with _LOCK:
@@ -32,7 +32,7 @@ def incr(name: str, amount: int = 1, **tags) -> None:
     )
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports observe_ms so the OCR/transcription journey stays clear and reliable.
 def observe_ms(name: str, duration_ms: float, **tags) -> None:
     metric = _tagged_name(name, {k: str(v) for k, v in tags.items()})
     value = float(max(0.0, duration_ms))
@@ -51,7 +51,7 @@ def observe_ms(name: str, duration_ms: float, **tags) -> None:
     )
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports snapshot so the OCR/transcription journey stays clear and reliable.
 def snapshot() -> dict:
     with _LOCK:
         counters = deepcopy(_COUNTERS)

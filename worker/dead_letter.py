@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports _to_int so the OCR/transcription journey stays clear and reliable.
 def _to_int(value, default: int) -> int:
     try:
         if value is None:
@@ -15,7 +15,7 @@ def _to_int(value, default: int) -> int:
         return default
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports _input_type_from_job so the OCR/transcription journey stays clear and reliable.
 def _input_type_from_job(job: dict) -> str:
     filename = str(job.get("filename") or "").lower()
     if filename.endswith(".pdf"):
@@ -34,7 +34,7 @@ def _input_type_from_job(job: dict) -> str:
     return "UNKNOWN"
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports _error_type_from_code so the OCR/transcription journey stays clear and reliable.
 def _error_type_from_code(error_code: str) -> str:
     code = (error_code or "").upper()
     if code.startswith("INPUT_") or code.startswith("VALIDATION_"):
@@ -48,7 +48,7 @@ def _error_type_from_code(error_code: str) -> str:
     return "SYSTEM"
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: builds the required payload/state for user OCR/transcription flow.
 def build_dead_letter_entry(
     *,
     job: dict,

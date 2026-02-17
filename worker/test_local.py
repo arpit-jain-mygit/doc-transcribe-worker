@@ -12,24 +12,24 @@ from pprint import pprint
 from worker.dispatcher import dispatch
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports banner so the OCR/transcription journey stays clear and reliable.
 def banner(title: str):
     print("\n" + "=" * 80)
     print(f"🧪 {title}")
     print("=" * 80 + "\n", flush=True)
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports log so the OCR/transcription journey stays clear and reliable.
 def log(msg: str):
     print(f"▶️  {msg}", flush=True)
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports log_ok so the OCR/transcription journey stays clear and reliable.
 def log_ok(msg: str):
     print(f"✅ {msg}", flush=True)
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports log_err so the OCR/transcription journey stays clear and reliable.
 def log_err(msg: str):
     print(f"❌ {msg}", flush=True)
 
@@ -37,7 +37,7 @@ def log_err(msg: str):
 # ---------------------------------------------------------
 # OCR TEST
 # ---------------------------------------------------------
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports test_pdf_ocr so the OCR/transcription journey stays clear and reliable.
 def test_pdf_ocr():
     banner("PDF OCR TEST (Local, No Redis)")
 
@@ -71,7 +71,7 @@ def test_pdf_ocr():
 # ---------------------------------------------------------
 # TRANSCRIPTION TEST
 # ---------------------------------------------------------
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports test_video_transcription so the OCR/transcription journey stays clear and reliable.
 def test_video_transcription():
     banner("VIDEO TRANSCRIPTION TEST (Local, No Redis)")
 

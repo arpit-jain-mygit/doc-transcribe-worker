@@ -4,6 +4,6 @@
 from worker.orchestrator.router import execute_job
 
 
-# User value: This step keeps the user OCR/transcription flow accurate and dependable.
+# User value: supports process_job so the OCR/transcription journey stays clear and reliable.
 def process_job(job_id: str, job: dict):
     return execute_job(job_id, job)
