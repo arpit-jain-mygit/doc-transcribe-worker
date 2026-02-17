@@ -5,8 +5,8 @@ Keep queue orchestration, execution logic, and adapters separated for easier rel
 
 ## Layers and dependency direction
 Allowed direction:
-- `worker_loop` (orchestrator) -> dispatcher -> executors (`ocr`, `transcribe`)
-- executors -> adapters (`redis`, `gcs`, model client wrappers)
+- `worker_loop` (orchestrator runtime) -> dispatcher/orchestrator router -> executors (`worker/executors/*`)
+- executors -> adapters (`worker/adapters/*`, `worker/utils/*`, model client wrappers)
 - domain/shared types/errors can be used by all layers
 
 Disallowed direction:
@@ -18,8 +18,9 @@ Disallowed direction:
 
 ## Current modules (as-is)
 - `worker/worker_loop.py`: queue poll and lifecycle updates
-- `worker/dispatcher.py`, `worker/jobs/processor.py`: routing to OCR/transcription
-- `worker/ocr.py`, `worker/transcribe.py`: core execution
+- `worker/dispatcher.py`, `worker/orchestrator/router.py`: routing/orchestration to executors
+- `worker/executors/ocr_executor.py`, `worker/executors/transcription_executor.py`: executor boundaries
+- `worker/ocr.py`, `worker/transcribe.py`: core execution engines used by executors
 - `worker/cancel.py`: cancellation helpers
 
 ## Target boundary (incremental)

@@ -19,5 +19,6 @@ Follow `/ARCHITECTURE.md` boundaries before changing queue, dispatcher, OCR, or 
 
 ## Review checklist
 - No queue-lifecycle logic in executor modules.
+- Keep route selection in `worker/orchestrator/router.py`; keep engine logic in executors/engines.
 - No silent exception swallowing.
 - No status transition without explicit stage/status write.
