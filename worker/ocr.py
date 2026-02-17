@@ -16,7 +16,7 @@ from typing import List
 
 import redis
 from dotenv import load_dotenv
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 
 from google.cloud import aiplatform
@@ -50,10 +50,24 @@ LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-DPI = 300
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return int(str(raw).strip())
+
+
+OCR_DPI = _env_int("OCR_DPI", 300)
+OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
 
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
+if OCR_DPI < 72:
+    raise RuntimeError("OCR_DPI must be >= 72")
+if OCR_PAGE_BATCH_SIZE < 0:
+    raise RuntimeError("OCR_PAGE_BATCH_SIZE must be >= 0")
 
 # =========================================================
 # REDIS
@@ -114,6 +128,28 @@ def normalize_output_filename(raw_name: str | None) -> str:
     return f"{sanitize_filename(stem)}.txt"
 
 
+
+
+def iter_pdf_pages(input_path: str):
+    if OCR_PAGE_BATCH_SIZE <= 0:
+        pages = convert_from_path(input_path, dpi=OCR_DPI)
+        yield 1, pages, len(pages)
+        return
+
+    info = pdfinfo_from_path(input_path)
+    total_pages = int(info.get("Pages", 0) or 0)
+    if total_pages <= 0:
+        raise RuntimeError("No pages detected in input PDF")
+
+    for first_page in range(1, total_pages + 1, OCR_PAGE_BATCH_SIZE):
+        last_page = min(total_pages, first_page + OCR_PAGE_BATCH_SIZE - 1)
+        pages = convert_from_path(
+            input_path,
+            dpi=OCR_DPI,
+            first_page=first_page,
+            last_page=last_page,
+        )
+        yield first_page, pages, total_pages
 
 
 def safe_hset(key: str, mapping: dict, retries: int = 1):
@@ -222,37 +258,49 @@ def run_ocr(job_id: str, job: dict) -> dict:
     ensure_not_cancelled(job_id, r=r)
     update(job_id, stage="Loading PDF", progress=5, eta_sec=120)
 
-    pages = convert_from_path(input_path, dpi=DPI)
-    total_pages = len(pages)
-
-    log(f"PDF pages detected: {total_pages}")
+    log(
+        f"OCR strategy dpi={OCR_DPI} page_batch_size={OCR_PAGE_BATCH_SIZE if OCR_PAGE_BATCH_SIZE > 0 else 'all'} job_id={job_id}"
+    )
 
     texts: List[str] = []
     start = time.perf_counter()
+    processed_pages = 0
+    total_pages = 0
 
-    for idx, page in enumerate(pages, start=1):
-        ensure_not_cancelled(job_id, r=r)
-        update(
-            job_id,
-            stage=f"OCR page {idx}/{total_pages}",
-            progress=10 + int((idx / total_pages) * 80),
-        )
+    for batch_first_page, pages, batch_total_pages in iter_pdf_pages(input_path):
+        if total_pages == 0:
+            total_pages = batch_total_pages
+            log(f"PDF pages detected: {total_pages}")
 
-        text = gemini_ocr(page, idx)
-        texts.append(text)
+        for offset, page in enumerate(pages, start=0):
+            idx = batch_first_page + offset
+            processed_pages += 1
 
-        elapsed = time.perf_counter() - start
-        avg = elapsed / idx
-        eta = int(avg * (total_pages - idx))
+            ensure_not_cancelled(job_id, r=r)
+            update(
+                job_id,
+                stage=f"OCR page {idx}/{total_pages}",
+                progress=10 + int((idx / total_pages) * 80),
+            )
 
-        safe_hset(
-            f"job_status:{job_id}",
-            {
-                "current_page": idx,
-                "total_pages": total_pages,
-                "eta_sec": eta,
-            },
-        )
+            text = gemini_ocr(page, idx)
+            texts.append(text)
+
+            elapsed = time.perf_counter() - start
+            avg = elapsed / max(1, processed_pages)
+            eta = int(avg * (total_pages - idx))
+
+            safe_hset(
+                f"job_status:{job_id}",
+                {
+                    "current_page": idx,
+                    "total_pages": total_pages,
+                    "eta_sec": eta,
+                },
+            )
+
+    if total_pages <= 0:
+        raise RuntimeError("No pages detected in input PDF")
 
     ensure_not_cancelled(job_id, r=r)
     update(job_id, stage="Finalizing OCR", progress=95)

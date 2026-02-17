@@ -49,6 +49,14 @@ Processing/GCP:
 - `GOOGLE_APPLICATION_CREDENTIALS_JSON` (base64 json credentials)
 - Any model/provider env vars required by OCR/transcription modules
 
+Processing strategy knobs (optional):
+- `TRANSCRIBE_CHUNK_DURATION_SEC` (default `300`, allowed `30..3600`)
+  - controls A/V chunk size used before Gemini transcription.
+- `OCR_DPI` (default `300`, allowed `72..600`)
+  - controls PDF rasterization quality/speed for OCR.
+- `OCR_PAGE_BATCH_SIZE` (default `0` = all pages at once, allowed `0..500`)
+  - when `>0`, OCR converts PDF in page windows to reduce peak memory and tune throughput.
+
 ## 5. Install Dependencies
 
 ```bash

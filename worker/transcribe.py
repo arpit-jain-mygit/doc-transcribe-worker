@@ -53,12 +53,23 @@ PROMPT_NAME = os.getenv("PROMPT_NAME")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-CHUNK_DURATION_SEC = 5 * 60  # 5 min
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = int(str(raw).strip())
+    return value
+
+
+CHUNK_DURATION_SEC = _env_int("TRANSCRIBE_CHUNK_DURATION_SEC", 5 * 60)
 
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
 if not PROMPT_FILE or not PROMPT_NAME:
     raise RuntimeError("PROMPT_FILE or PROMPT_NAME not set")
+if CHUNK_DURATION_SEC < 30:
+    raise RuntimeError("TRANSCRIBE_CHUNK_DURATION_SEC must be >= 30")
 
 # =========================================================
 # LOGGING
@@ -216,7 +227,7 @@ def split_audio(mp3_path: str) -> List[str]:
         log(f"Created chunk file={os.path.basename(out)}")
         chunks.append(out)
 
-    log(f"Total chunks={len(chunks)}")
+    log(f"Total chunks={len(chunks)} (chunk_duration_sec={CHUNK_DURATION_SEC})")
     return chunks
 
 # =========================================================
@@ -269,6 +280,8 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
 
     chunks = split_audio(local_input)
     total = len(chunks)
+
+    log(f"Transcription strategy chunk_duration_sec={CHUNK_DURATION_SEC} job_id={job_id}")
 
     texts: List[str] = []
 

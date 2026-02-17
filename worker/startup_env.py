@@ -23,6 +23,33 @@ def _require_keys(keys: List[str], errors: List[str]) -> None:
             errors.append(f"{key} is required")
 
 
+def _validate_int_range(
+    key: str,
+    errors: List[str],
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+    allow_blank: bool = True,
+) -> None:
+    raw = os.getenv(key)
+    if _is_blank(raw):
+        if allow_blank:
+            return
+        errors.append(f"{key} is required")
+        return
+
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        errors.append(f"{key} must be an integer")
+        return
+
+    if min_value is not None and value < min_value:
+        errors.append(f"{key} must be >= {min_value}")
+    if max_value is not None and value > max_value:
+        errors.append(f"{key} must be <= {max_value}")
+
+
 def validate_startup_env() -> None:
     errors: List[str] = []
     warnings: List[str] = []
@@ -37,6 +64,10 @@ def validate_startup_env() -> None:
         errors,
     )
     _validate_redis_url(os.getenv("REDIS_URL"), "REDIS_URL", errors)
+
+    _validate_int_range("TRANSCRIBE_CHUNK_DURATION_SEC", errors, min_value=30, max_value=3600)
+    _validate_int_range("OCR_DPI", errors, min_value=72, max_value=600)
+    _validate_int_range("OCR_PAGE_BATCH_SIZE", errors, min_value=0, max_value=500)
 
     queue_mode = (os.getenv("QUEUE_MODE", "single") or "single").strip().lower()
     if queue_mode not in {"single", "both"}:
