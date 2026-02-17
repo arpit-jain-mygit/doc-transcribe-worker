@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 from __future__ import annotations
 
 import logging
@@ -40,6 +41,7 @@ _ALLOWED = {
 }
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _norm(status: Optional[str]) -> Optional[str]:
     if status is None:
         return None
@@ -47,6 +49,7 @@ def _norm(status: Optional[str]) -> Optional[str]:
     return s or None
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def is_allowed_transition(current: Optional[str], target: Optional[str]) -> bool:
     target_n = _norm(target)
     if not target_n:
@@ -56,6 +59,7 @@ def is_allowed_transition(current: Optional[str], target: Optional[str]) -> bool
     return target_n in allowed
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def guarded_hset(r, *, key: str, mapping: dict, context: str, request_id: str = "") -> tuple[bool, Optional[str], Optional[str]]:
     target = _norm(mapping.get("status"))
     if not target:

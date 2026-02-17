@@ -12,6 +12,7 @@ Follow `/ARCHITECTURE.md` boundaries before changing queue, dispatcher, OCR, or 
 - Map exceptions to explicit failure classes.
 - Ensure status update writes remain consistent.
 - Add test notes (sample input + expected status path).
+- Add a crisp user-centric comment at file top and at method/function level for every new/modified code file.
 
 ## Logging minimum
 - Include: `job_id`, `request_id` (if available), `stage`, `duration_sec`, `error_code`.

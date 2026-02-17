@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import logging
 import os
 import redis
@@ -12,6 +13,7 @@ class JobCancelledError(Exception):
     pass
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _redis_client() -> redis.Redis:
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     return redis.Redis.from_url(
@@ -25,6 +27,7 @@ def _redis_client() -> redis.Redis:
     )
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def is_cancelled(job_id: str, r: redis.Redis | None = None, retries: int = 2) -> bool:
     # Backward-compatible parameter: if explicit retries provided, override policy.
     policy = REDIS_POLICY
@@ -37,6 +40,7 @@ def is_cancelled(job_id: str, r: redis.Redis | None = None, retries: int = 2) ->
             jitter_ratio=REDIS_POLICY.jitter_ratio,
         )
 
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def _read_cancel_state() -> bool:
         rc = r if r is not None else _redis_client()
         data = rc.hgetall(f"job_status:{job_id}")
@@ -44,6 +48,7 @@ def is_cancelled(job_id: str, r: redis.Redis | None = None, retries: int = 2) ->
             return False
         return data.get("cancel_requested") == "1" or (data.get("status") or "").upper() == "CANCELLED"
 
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def _on_retry(attempt: int, exc: BaseException) -> None:
         logger.warning(
             "cancel_check_redis_connection_error job_id=%s attempt=%s/%s error=%s",
@@ -70,6 +75,7 @@ def is_cancelled(job_id: str, r: redis.Redis | None = None, retries: int = 2) ->
         return False
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def ensure_not_cancelled(job_id: str, r: redis.Redis | None = None):
     if is_cancelled(job_id, r=r):
         raise JobCancelledError(f"Job {job_id} cancelled by user")

@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 # worker/utils/gcs.py
 # -*- coding: utf-8 -*-
 
@@ -23,11 +24,13 @@ _client = None
 logger = logging.getLogger(__name__)
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _retry_io(operation: str, target: str, fn):
     start = time.perf_counter()
 
     attempt = 0
 
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def _on_retry(next_attempt: int, exc: BaseException) -> None:
         nonlocal attempt
         attempt = next_attempt
@@ -58,6 +61,7 @@ def _retry_io(operation: str, target: str, fn):
         raise
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _get_client():
     """
     Lazily initialize and cache GCS client.
@@ -81,6 +85,7 @@ def _get_client():
 # ---------------------------------------------------------
 # INTERNAL: SIGNED URL
 # ---------------------------------------------------------
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _signed_url(blob, expires_days: int = 7) -> str:
     """
     Generate browser-downloadable HTTPS URL.
@@ -99,6 +104,7 @@ def _signed_url(blob, expires_days: int = 7) -> str:
 # ---------------------------------------------------------
 # PUBLIC SIGNED URL
 # ---------------------------------------------------------
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def generate_signed_url(
     bucket_name: str,
     blob_path: str,
@@ -114,6 +120,7 @@ def generate_signed_url(
 # ---------------------------------------------------------
 # UPLOAD TEXT
 # ---------------------------------------------------------
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def upload_text(
     *,
     content: str,
@@ -151,6 +158,7 @@ def upload_text(
 # ---------------------------------------------------------
 # UPLOAD FILE
 # ---------------------------------------------------------
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def upload_file(*, local_path: str, destination_path: str) -> dict:
     client = _get_client()
     bucket = client.bucket(GCS_BUCKET)
@@ -175,6 +183,7 @@ def upload_file(*, local_path: str, destination_path: str) -> dict:
 # ---------------------------------------------------------
 # APPEND WORKER LOG
 # ---------------------------------------------------------
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def append_log(job_id: str, message: str):
     ts = datetime.utcnow().isoformat() + "Z"
     path = f"jobs/{job_id}/logs/worker.log"
@@ -196,6 +205,7 @@ def append_log(job_id: str, message: str):
 # ---------------------------------------------------------
 # DOWNLOAD FROM GCS (LOCAL)
 # ---------------------------------------------------------
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def download_from_gcs(gcs_uri: str) -> str:
     logger.info(f"GCS download started: gcs_uri={gcs_uri}")
 

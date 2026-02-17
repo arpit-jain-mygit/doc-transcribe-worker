@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 CONTRACT_VERSION = "2026-02-16-prs-009"
 
 JOB_TYPES = ("OCR", "TRANSCRIPTION")

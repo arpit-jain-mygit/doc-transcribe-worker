@@ -1,3 +1,4 @@
+# User value: This config keeps OCR/transcription delivery and operations reliable for users.
 services:
   - type: worker
     name: doc-transcribe-worker

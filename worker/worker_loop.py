@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import json
 import time
 import logging
@@ -30,6 +31,7 @@ validate_startup_env()
 from worker.dispatcher import dispatch
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def log_stage_event(*, job_id: str, request_id: str, stage: str, event: str, **extra):
     payload = {
         "job_id": job_id,
@@ -77,6 +79,7 @@ MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
 # =========================================================
 # QUEUE RESOLUTION
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def queue_targets() -> list[str]:
     if QUEUE_MODE == "both":
         targets = [LOCAL_QUEUE_NAME, CLOUD_QUEUE_NAME]
@@ -95,6 +98,7 @@ def queue_targets() -> list[str]:
     return ordered
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def dlq_for_queue(queue: str) -> str:
     if QUEUE_MODE == "both":
         if queue == CLOUD_QUEUE_NAME:
@@ -109,6 +113,7 @@ def dlq_for_queue(queue: str) -> str:
     return DLQ_NAME
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def queue_source_label(queue: str) -> str:
     if QUEUE_MODE == "both":
         if queue == CLOUD_QUEUE_NAME:
@@ -125,10 +130,12 @@ def queue_source_label(queue: str) -> str:
     return "SINGLE"
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _job_type(job: dict) -> str:
     return str(job.get("job_type") or job.get("type") or "").upper()
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def inflight_limit_for(job_type: str) -> int:
     if job_type == "OCR":
         return max(0, WORKER_MAX_INFLIGHT_OCR)
@@ -137,11 +144,13 @@ def inflight_limit_for(job_type: str) -> int:
     return 1
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def inflight_set_key(job_type: str) -> str:
     jt = job_type if job_type in {"OCR", "TRANSCRIPTION"} else "OTHER"
     return f"worker:inflight:{jt}"
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def should_retry(error_code: str, attempts: int) -> tuple[bool, int]:
     if error_code in {"INFRA_REDIS", "INFRA_GCS", "RATE_LIMIT_EXCEEDED"}:
         budget = RETRY_BUDGET_TRANSIENT
@@ -155,6 +164,7 @@ def should_retry(error_code: str, attempts: int) -> tuple[bool, int]:
 # =========================================================
 # REDIS CONNECT
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def connect_redis():
     logger.info("Connecting to Redis")
     r = redis.from_url(
@@ -187,6 +197,7 @@ def connect_redis():
 # =========================================================
 # DIAGNOSTIC HELPERS
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def log_redis_health(r, prefix=""):
     try:
         t0 = time.time()
@@ -197,6 +208,7 @@ def log_redis_health(r, prefix=""):
         logger.error(f"{prefix}Redis PING FAILED: {e}")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def log_queue_depths(r):
     for q in queue_targets():
         try:

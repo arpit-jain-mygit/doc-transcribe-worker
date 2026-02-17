@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import logging
 import os
 import random
@@ -10,6 +11,7 @@ T = TypeVar("T")
 logger = logging.getLogger("worker.retry")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -21,6 +23,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -67,6 +70,7 @@ GCS_POLICY = RetryPolicy(
 )
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _compute_delay(policy: RetryPolicy, attempt: int) -> float:
     # attempt starts at 1 for first retry delay
     exponential = policy.base_delay_sec * (2 ** max(0, attempt - 1))
@@ -77,6 +81,7 @@ def _compute_delay(policy: RetryPolicy, attempt: int) -> float:
     return capped + jitter
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def run_with_retry(
     *,
     operation: str,

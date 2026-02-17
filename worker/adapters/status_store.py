@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import logging
 from datetime import datetime
 
@@ -8,6 +9,7 @@ from worker.status_machine import guarded_hset
 logger = logging.getLogger("worker.adapters.status_store")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def update_status(redis_client: redis.Redis, job_id: str, *, context: str = "STATUS_STORE", **fields):
     key = f"job_status:{job_id}"
     fields["updated_at"] = datetime.utcnow().isoformat()

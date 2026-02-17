@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import logging
 import os
 
@@ -9,6 +10,7 @@ logger = logging.getLogger("worker.orchestrator.router")
 OCR_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def looks_like_ocr_input(job: dict) -> bool:
     filename = (job.get("filename") or "").strip()
     if not filename:
@@ -17,6 +19,7 @@ def looks_like_ocr_input(job: dict) -> bool:
     return ext in OCR_EXTS
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def resolve_executor(job: dict):
     source = (job.get("source") or "").lower()
     job_type = (job.get("job_type") or job.get("type") or "").upper()
@@ -27,6 +30,7 @@ def resolve_executor(job: dict):
     return "transcription", execute_transcription
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def execute_job(job_id: str, job: dict):
     route, executor = resolve_executor(job)
     logger.info(

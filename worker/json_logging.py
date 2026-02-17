@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import json
 import logging
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ _EXCLUDED_FIELDS = {
 }
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _normalize(value: Any) -> Any:
     if value is None:
         return None
@@ -47,10 +49,12 @@ def _normalize(value: Any) -> Any:
 
 
 class JsonLogFormatter(logging.Formatter):
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def __init__(self, service: str):
         super().__init__()
         self.service = service
 
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -73,6 +77,7 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def configure_json_logging(service: str, level: int) -> None:
     root = logging.getLogger()
     handler = logging.StreamHandler()

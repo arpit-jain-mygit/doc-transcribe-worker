@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 import logging
 import os
 from typing import List
@@ -5,10 +6,12 @@ from typing import List
 logger = logging.getLogger("worker.startup")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _is_blank(value: str | None) -> bool:
     return value is None or not str(value).strip()
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _validate_redis_url(value: str | None, key: str, errors: List[str]) -> None:
     if _is_blank(value):
         errors.append(f"{key} is required")
@@ -17,12 +20,14 @@ def _validate_redis_url(value: str | None, key: str, errors: List[str]) -> None:
         errors.append(f"{key} must start with redis:// or rediss://")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _require_keys(keys: List[str], errors: List[str]) -> None:
     for key in keys:
         if _is_blank(os.getenv(key)):
             errors.append(f"{key} is required")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _validate_int_range(
     key: str,
     errors: List[str],
@@ -50,6 +55,7 @@ def _validate_int_range(
         errors.append(f"{key} must be <= {max_value}")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def validate_startup_env() -> None:
     errors: List[str] = []
     warnings: List[str] = []

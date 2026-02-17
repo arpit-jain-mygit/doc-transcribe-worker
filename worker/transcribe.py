@@ -1,3 +1,4 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 # -*- coding: utf-8 -*-
 """
 REAL AUDIO TRANSCRIPTION (Gemini ASR)
@@ -54,6 +55,7 @@ PROMPT_NAME = os.getenv("PROMPT_NAME")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -77,12 +79,14 @@ if CHUNK_DURATION_SEC < 30:
 logger = logging.getLogger("worker.transcribe")
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def log(msg: str):
     logger.info("[TRANSCRIBE %s] %s", datetime.utcnow().isoformat(), msg)
 
 # =========================================================
 # REDIS (SAFE FACTORY)
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def get_redis():
     return redis.Redis.from_url(
         REDIS_URL,
@@ -97,6 +101,7 @@ def get_redis():
 # =========================================================
 # REDIS SAFE WRITE
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def safe_hset(key: str, mapping: dict, retries: int = 1):
     policy = REDIS_POLICY
     if retries != REDIS_POLICY.max_retries:
@@ -108,6 +113,7 @@ def safe_hset(key: str, mapping: dict, retries: int = 1):
             jitter_ratio=REDIS_POLICY.jitter_ratio,
         )
 
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def _write_once():
         r = get_redis()
         ok, current_status, _ = guarded_hset(
@@ -121,6 +127,7 @@ def safe_hset(key: str, mapping: dict, retries: int = 1):
             log(f"Blocked status transition key={key} from={current_status} to={mapping.get('status')}")
         return None
 
+    # User value: This step keeps the user OCR/transcription flow accurate and dependable.
     def _on_retry(attempt: int, exc: BaseException) -> None:
         log(f"Redis HSET retry key={key} attempt={attempt}/{policy.max_retries} error={exc}")
 
@@ -142,6 +149,7 @@ model = GenerativeModel(MODEL_NAME)
 # =========================================================
 # PROMPT
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
     with open(prompt_file, "r", encoding="utf-8") as f:
         content = f.read()
@@ -159,6 +167,7 @@ AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
 # =========================================================
 # UTILS
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def sanitize_filename(name: str, max_len: int = 180) -> str:
     name = unicodedata.normalize("NFKC", name)
     name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
@@ -167,11 +176,13 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
     return name[:max_len]
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def normalize_output_filename(raw_name: str | None) -> str:
     stem, _ = os.path.splitext(raw_name or "transcript")
     return f"{sanitize_filename(stem)}.txt"
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"):
     safe_hset(
         f"job_status:{job_id}",
@@ -187,6 +198,7 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
 # =========================================================
 # AUDIO SPLIT (DIAGNOSTIC)
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def split_audio(mp3_path: str) -> List[str]:
     file_size = os.path.getsize(mp3_path)
     with open(mp3_path, "rb") as f:
@@ -233,6 +245,7 @@ def split_audio(mp3_path: str) -> List[str]:
 # =========================================================
 # GEMINI ASR
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
     log(f"Gemini ASR chunk {idx}/{total}")
 
@@ -262,6 +275,7 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
 # =========================================================
 # ENTRYPOINT
 # =========================================================
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
     ensure_not_cancelled(job_id)
     if "input_gcs_uri" not in job:

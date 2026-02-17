@@ -1,8 +1,10 @@
+# User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
 from __future__ import annotations
 
 import redis
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def _is_gcs_connection_error(low: str) -> bool:
     connection_markers = (
         "remote end closed connection",
@@ -27,6 +29,7 @@ def _is_gcs_connection_error(low: str) -> bool:
     return has_connection_issue and has_gcs_context
 
 
+# User value: This step keeps the user OCR/transcription flow accurate and dependable.
 def classify_error(exc: Exception) -> tuple[str, str]:
     text = f"{exc}".strip()
     low = text.lower()
