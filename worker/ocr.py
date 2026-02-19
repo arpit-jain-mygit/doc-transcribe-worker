@@ -6,6 +6,7 @@ Drop-in replacement for pytesseract-based ocr.py
 """
 
 import io
+import json
 import logging
 import os
 import re
@@ -32,6 +33,7 @@ from worker.contract import CONTRACT_VERSION
 from worker.utils.gcs import download_from_gcs, upload_text
 from worker.status_machine import guarded_hset
 from worker.utils.retry_policy import REDIS_POLICY, run_with_retry
+from worker.quality.ocr_quality import score_page, summarize_document_quality
 
 # =========================================================
 # UTF-8 SAFE OUTPUT
@@ -279,6 +281,8 @@ def run_ocr(job_id: str, job: dict) -> dict:
     start = time.perf_counter()
     processed_pages = 0
     total_pages = 0
+    page_scores: List[float] = []
+    all_quality_hints: List[str] = []
 
     for batch_first_page, pages, batch_total_pages in iter_pdf_pages(input_path):
         if total_pages == 0:
@@ -299,6 +303,11 @@ def run_ocr(job_id: str, job: dict) -> dict:
             text = gemini_ocr(page, idx)
             texts.append(text)
 
+            page_score, page_metrics, page_hints = score_page(text, page)
+            page_scores.append(page_score)
+            if page_hints:
+                all_quality_hints.extend([f"Page {idx}: {hint}" for hint in page_hints])
+
             elapsed = time.perf_counter() - start
             avg = elapsed / max(1, processed_pages)
             eta = int(avg * (total_pages - idx))
@@ -309,6 +318,8 @@ def run_ocr(job_id: str, job: dict) -> dict:
                     "current_page": idx,
                     "total_pages": total_pages,
                     "eta_sec": eta,
+                    "ocr_page_score": page_score,
+                    "ocr_page_metrics": json.dumps(page_metrics, ensure_ascii=False),
                 },
             )
 
@@ -335,6 +346,9 @@ def run_ocr(job_id: str, job: dict) -> dict:
             "progress": 100,
             "output_path": uploaded["gcs_uri"],
             "output_filename": output_filename,
+            "ocr_quality_score": ocr_quality_score,
+            "low_confidence_pages": json.dumps(low_confidence_pages, ensure_ascii=False),
+            "quality_hints": json.dumps(quality_hints, ensure_ascii=False),
             "error_code": "",
             "error_message": "",
             "error_detail": "",
@@ -343,7 +357,7 @@ def run_ocr(job_id: str, job: dict) -> dict:
         },
     )
 
-    log(f"OCR completed -> {uploaded['gcs_uri']}")
+    log(f"OCR completed -> {uploaded['gcs_uri']} quality_score={ocr_quality_score} low_pages={len(low_confidence_pages)}")
     return {
         "gcs_uri": uploaded["gcs_uri"],
         "output_filename": output_filename,
