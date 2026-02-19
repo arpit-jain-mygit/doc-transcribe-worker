@@ -13,6 +13,7 @@ from worker.contract import CONTRACT_VERSION
 from worker.status_machine import guarded_hset
 from worker.error_catalog import classify_error
 from worker.dead_letter import build_dead_letter_entry
+from worker.recovery_policy import decide_recovery_action
 from worker.json_logging import configure_json_logging
 from worker.metrics import incr, observe_ms
 from worker.startup_env import validate_startup_env
@@ -148,17 +149,6 @@ def inflight_limit_for(job_type: str) -> int:
 def inflight_set_key(job_type: str) -> str:
     jt = job_type if job_type in {"OCR", "TRANSCRIPTION"} else "OTHER"
     return f"worker:inflight:{jt}"
-
-
-# User value: improves reliability when OCR/transcription dependencies fail transiently.
-def should_retry(error_code: str, attempts: int) -> tuple[bool, int]:
-    if error_code in {"INFRA_REDIS", "INFRA_GCS", "RATE_LIMIT_EXCEEDED"}:
-        budget = RETRY_BUDGET_TRANSIENT
-    elif error_code in {"MEDIA_DECODE_FAILED", "INPUT_NOT_FOUND"}:
-        budget = RETRY_BUDGET_MEDIA
-    else:
-        budget = RETRY_BUDGET_DEFAULT
-    return attempts < budget, budget
 
 
 # =========================================================
@@ -522,9 +512,17 @@ while True:
                     error_detail = f"{e.__class__.__name__}: {e}"
                     latest = r.hgetall(key) if key else {}
                     failed_stage = (latest.get("stage") or "Processing failed").strip()
-                    retry_allowed, retry_budget = should_retry(error_code, current_attempt if "current_attempt" in locals() else 0)
+                    recovery = decide_recovery_action(
+                        error_code=error_code,
+                        attempts=current_attempt if "current_attempt" in locals() else 0,
+                        budget_transient=RETRY_BUDGET_TRANSIENT,
+                        budget_media=RETRY_BUDGET_MEDIA,
+                        budget_default=RETRY_BUDGET_DEFAULT,
+                    )
+                    retry_allowed = bool(recovery["retry_allowed"])
+                    retry_budget = int(recovery["recovery_max_attempts"])
                     if retry_allowed:
-                        next_attempt = (current_attempt if "current_attempt" in locals() else 0) + 1
+                        next_attempt = int(recovery["recovery_attempt"])
                         backoff = min(5.0, 0.5 * (2 ** max(0, next_attempt - 1)))
                         ok, prev_status, _ = guarded_hset(
                             r,
@@ -539,6 +537,21 @@ while True:
                                 "error_message": error_message,
                                 "error_detail": error_detail,
                                 "error": error_message,
+                                "recovery_action": str(recovery["recovery_action"]),
+                                "recovery_reason": str(recovery["recovery_reason"]),
+                                "recovery_attempt": str(recovery["recovery_attempt"]),
+                                "recovery_max_attempts": str(recovery["recovery_max_attempts"]),
+                                "recovery_trace": json.dumps(
+                                    [
+                                        {
+                                            "action": str(recovery["recovery_action"]),
+                                            "reason": str(recovery["recovery_reason"]),
+                                            "attempt": int(recovery["recovery_attempt"]),
+                                            "max_attempts": int(recovery["recovery_max_attempts"]),
+                                        }
+                                    ],
+                                    ensure_ascii=False,
+                                ),
                             },
                             context="WORKER_RETRY_REQUEUE",
                             request_id=request_id,
@@ -548,6 +561,21 @@ while True:
                         retry_payload = dict(job)
                         retry_payload["attempts"] = next_attempt
                         retry_payload["max_attempts"] = retry_budget
+                        retry_payload["recovery_action"] = str(recovery["recovery_action"])
+                        retry_payload["recovery_reason"] = str(recovery["recovery_reason"])
+                        retry_payload["recovery_attempt"] = str(recovery["recovery_attempt"])
+                        retry_payload["recovery_max_attempts"] = str(recovery["recovery_max_attempts"])
+                        retry_payload["recovery_trace"] = json.dumps(
+                            [
+                                {
+                                    "action": str(recovery["recovery_action"]),
+                                    "reason": str(recovery["recovery_reason"]),
+                                    "attempt": int(recovery["recovery_attempt"]),
+                                    "max_attempts": int(recovery["recovery_max_attempts"]),
+                                }
+                            ],
+                            ensure_ascii=False,
+                        )
                         logger.warning(
                             "Retrying job_id=%s request_id=%s error_code=%s attempt=%s/%s backoff_sec=%.2f",
                             job_id,
@@ -572,6 +600,21 @@ while True:
                             "error_message": error_message,
                             "error_detail": error_detail,
                             "error": error_message,
+                            "recovery_action": "fail_fast_dlq",
+                            "recovery_reason": str(recovery["recovery_reason"]),
+                            "recovery_attempt": str(recovery["recovery_attempt"]),
+                            "recovery_max_attempts": str(recovery["recovery_max_attempts"]),
+                            "recovery_trace": json.dumps(
+                                [
+                                    {
+                                        "action": "fail_fast_dlq",
+                                        "reason": str(recovery["recovery_reason"]),
+                                        "attempt": int(recovery["recovery_attempt"]),
+                                        "max_attempts": int(recovery["recovery_max_attempts"]),
+                                    }
+                                ],
+                                ensure_ascii=False,
+                            ),
                             "updated_at": datetime.utcnow().isoformat(),
                         },
                         context="WORKER_ERROR_FAILED",
@@ -580,6 +623,22 @@ while True:
                     if not ok:
                         logger.warning("Failed status update blocked job_id=%s from=%s", job_id, prev_status)
                     target_dlq = active_dlq if "active_dlq" in locals() else DLQ_NAME
+                    if "job" in locals() and isinstance(job, dict):
+                        job["recovery_action"] = "fail_fast_dlq"
+                        job["recovery_reason"] = str(recovery["recovery_reason"])
+                        job["recovery_attempt"] = str(recovery["recovery_attempt"])
+                        job["recovery_max_attempts"] = str(recovery["recovery_max_attempts"])
+                        job["recovery_trace"] = json.dumps(
+                            [
+                                {
+                                    "action": "fail_fast_dlq",
+                                    "reason": str(recovery["recovery_reason"]),
+                                    "attempt": int(recovery["recovery_attempt"]),
+                                    "max_attempts": int(recovery["recovery_max_attempts"]),
+                                }
+                            ],
+                            ensure_ascii=False,
+                        )
                     dlq_payload = build_dead_letter_entry(
                         job=job,
                         queue_name=queue if "queue" in locals() else "UNKNOWN",
