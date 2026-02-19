@@ -14,6 +14,7 @@ import os
 import sys
 import re
 import time
+import json
 import unicodedata
 import hashlib
 from datetime import datetime
@@ -28,6 +29,7 @@ from vertexai.preview.generative_models import GenerativeModel, Part
 
 from worker.cancel import ensure_not_cancelled
 from worker.contract import CONTRACT_VERSION
+from worker.quality.transcription_quality import score_segment, summarize_segments
 from worker.utils.gcs import upload_text, download_from_gcs
 from worker.status_machine import guarded_hset
 from worker.utils.retry_policy import REDIS_POLICY, run_with_retry
@@ -298,6 +300,8 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
     log(f"Transcription strategy chunk_duration_sec={CHUNK_DURATION_SEC} job_id={job_id}")
 
     texts: List[str] = []
+    segment_rows: List[dict] = []
+    segment_start_sec = 0.0
 
     for idx, chunk in enumerate(chunks, start=1):
         ensure_not_cancelled(job_id)
@@ -306,11 +310,26 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
             stage=f"Transcribing chunk {idx}/{total}",
             progress=10 + int((idx / total) * 80),
         )
-        texts.append(transcribe_chunk(chunk, idx, total))
+        text = transcribe_chunk(chunk, idx, total)
+        texts.append(text)
+        chunk_duration_sec = round(len(AudioSegment.from_file(chunk)) / 1000.0, 2)
+        seg_score, seg_metrics, seg_hints = score_segment(text)
+        segment_rows.append(
+            {
+                "segment_index": idx,
+                "start_sec": round(segment_start_sec, 2),
+                "end_sec": round(segment_start_sec + chunk_duration_sec, 2),
+                "score": round(seg_score, 4),
+                "hint": seg_hints[0] if seg_hints else "",
+                "metrics": seg_metrics,
+            }
+        )
+        segment_start_sec += chunk_duration_sec
 
     ensure_not_cancelled(job_id)
     final_text = "\n\n".join(texts)
     log(f"Final transcript length chars={len(final_text)}")
+    transcript_quality_score, low_confidence_segments, transcript_quality_hints = summarize_segments(segment_rows)
 
     output_filename = normalize_output_filename(job.get("output_filename") or job.get("filename"))
 
@@ -333,6 +352,10 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
                 "error_message": "",
                 "error_detail": "",
                 "error": "",
+                "transcript_quality_score": str(transcript_quality_score),
+                "low_confidence_segments": json.dumps(low_confidence_segments, ensure_ascii=False),
+                "segment_quality": json.dumps(segment_rows, ensure_ascii=False),
+                "transcript_quality_hints": json.dumps(transcript_quality_hints, ensure_ascii=False),
                 "updated_at": datetime.utcnow().isoformat(),
             },
         )
