@@ -80,9 +80,14 @@ INFLIGHT_REQUEUE_BACKOFF_BASE_SEC = float(os.getenv("INFLIGHT_REQUEUE_BACKOFF_BA
 INFLIGHT_REQUEUE_BACKOFF_MAX_SEC = float(os.getenv("INFLIGHT_REQUEUE_BACKOFF_MAX_SEC", "5.0"))
 INFLIGHT_REQUEUE_BACKOFF_JITTER_SEC = float(os.getenv("INFLIGHT_REQUEUE_BACKOFF_JITTER_SEC", "0.25"))
 INFLIGHT_STALE_SWEEP_INTERVAL_SEC = int(os.getenv("INFLIGHT_STALE_SWEEP_INTERVAL_SEC", "15"))
+WORKER_SCHEDULER_POLICY = str(os.getenv("WORKER_SCHEDULER_POLICY", "adaptive")).strip().lower() or "adaptive"
+WORKER_SCHEDULER_MAX_CONSECUTIVE = int(os.getenv("WORKER_SCHEDULER_MAX_CONSECUTIVE", "2"))
+WORKER_SCHEDULER_ACTIVE_DEPTH_MIN = int(os.getenv("WORKER_SCHEDULER_ACTIVE_DEPTH_MIN", "1"))
 _TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _requeue_hits: dict[str, int] = {}
 _last_inflight_sweep_ts: dict[str, float] = {}
+_last_dequeue_queue = ""
+_last_dequeue_streak = 0
 
 
 # =========================================================
@@ -260,6 +265,83 @@ def log_queue_depths(r):
             logger.error(f"Failed to read queue depth for {q}: {e}")
 
 
+# User value: records dequeue streak so scheduler can prevent one queue from starving another.
+def mark_dequeue(queue: str) -> None:
+    global _last_dequeue_queue, _last_dequeue_streak
+    if queue == _last_dequeue_queue:
+        _last_dequeue_streak += 1
+    else:
+        _last_dequeue_queue = queue
+        _last_dequeue_streak = 1
+
+
+# User value: reads queue depth safely so scheduler can make fair dequeue decisions.
+def safe_queue_depth(r, queue: str) -> int:
+    try:
+        return int(r.llen(queue) or 0)
+    except Exception:
+        return 0
+
+
+# User value: exposes queue orchestration snapshot for consistent logs/API diagnostics.
+def scheduler_snapshot(r, targets: list[str]) -> dict:
+    return {
+        "policy": WORKER_SCHEDULER_POLICY,
+        "max_consecutive": max(1, WORKER_SCHEDULER_MAX_CONSECUTIVE),
+        "last_queue": _last_dequeue_queue,
+        "last_streak": int(_last_dequeue_streak),
+        "depths": {q: safe_queue_depth(r, q) for q in targets},
+    }
+
+
+# User value: picks BRPOP target order adaptively to reduce queue starvation under mixed workloads.
+def scheduled_queue_targets(r) -> list[str]:
+    targets = queue_targets()
+    if len(targets) < 2:
+        return targets
+
+    policy = WORKER_SCHEDULER_POLICY if WORKER_SCHEDULER_POLICY in {"fifo", "fair", "adaptive"} else "adaptive"
+    if policy == "fifo":
+        return targets
+
+    depths = {q: safe_queue_depth(r, q) for q in targets}
+    active_depth_min = max(0, WORKER_SCHEDULER_ACTIVE_DEPTH_MIN)
+    active = [q for q in targets if depths.get(q, 0) >= max(1, active_depth_min)]
+    if not active:
+        active = [q for q in targets if depths.get(q, 0) > 0]
+    if not active:
+        return targets
+
+    if policy == "fair":
+        if _last_dequeue_queue and _last_dequeue_queue in targets:
+            start = targets.index(_last_dequeue_queue)
+            rotated = targets[start + 1:] + targets[:start + 1]
+            return rotated
+        return targets
+
+    max_consecutive = max(1, WORKER_SCHEDULER_MAX_CONSECUTIVE)
+    if (
+        _last_dequeue_queue
+        and _last_dequeue_queue in active
+        and _last_dequeue_streak >= max_consecutive
+    ):
+        alternatives = [q for q in active if q != _last_dequeue_queue]
+        if alternatives:
+            alternatives.sort(key=lambda q: depths.get(q, 0), reverse=True)
+            forced = alternatives[0]
+            ordered = [forced] + [q for q in targets if q != forced]
+            return ordered
+
+    if len(active) > 1 and _last_dequeue_queue in active:
+        alternatives = [q for q in active if q != _last_dequeue_queue]
+        alternatives.sort(key=lambda q: depths.get(q, 0), reverse=True)
+        if alternatives:
+            next_q = alternatives[0]
+            return [next_q] + [q for q in targets if q != next_q]
+
+    return sorted(targets, key=lambda q: depths.get(q, 0), reverse=True)
+
+
 # =========================================================
 # STARTUP
 # =========================================================
@@ -274,6 +356,12 @@ logger.info(
     RETRY_BUDGET_TRANSIENT,
     RETRY_BUDGET_MEDIA,
     RETRY_BUDGET_DEFAULT,
+)
+logger.info(
+    "WORKER_SCHEDULER policy=%s max_consecutive=%s active_depth_min=%s",
+    WORKER_SCHEDULER_POLICY,
+    max(1, WORKER_SCHEDULER_MAX_CONSECUTIVE),
+    max(0, WORKER_SCHEDULER_ACTIVE_DEPTH_MIN),
 )
 worker_identity = f"{socket.gethostname()}:{os.getpid()}"
 logger.info("WORKER_ID=%s", worker_identity)
@@ -298,8 +386,16 @@ while True:
             r = connect_redis()
             last_job_ts = time.time()
 
-        targets = queue_targets()
-        logger.info(f"Entering BRPOP wait targets={targets}")
+        targets = scheduled_queue_targets(r)
+        snapshot = scheduler_snapshot(r, queue_targets())
+        logger.info(
+            "Entering BRPOP wait targets=%s scheduler_policy=%s streak=%s last_queue=%s depths=%s",
+            targets,
+            snapshot["policy"],
+            snapshot["last_streak"],
+            snapshot["last_queue"],
+            snapshot["depths"],
+        )
 
         start_wait = time.time()
         try:
@@ -328,6 +424,7 @@ while True:
         last_job_ts = time.time()
 
         logger.info(f"BRPOP returned after {waited}s from queue={queue}")
+        mark_dequeue(queue)
         logger.info(f"Queue source classification={source_label}")
         logger.info(f"DLQ target for this job={active_dlq}")
         log_queue_depths(r)

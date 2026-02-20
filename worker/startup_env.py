@@ -55,6 +55,23 @@ def _validate_int_range(
         errors.append(f"{key} must be <= {max_value}")
 
 
+# User value: prevents invalid scheduler mode so queue orchestration stays predictable for user jobs.
+def _validate_choice_env(
+    key: str,
+    errors: List[str],
+    *,
+    allowed: set[str],
+    default: str | None = None,
+) -> None:
+    raw = os.getenv(key, default if default is not None else "")
+    value = str(raw or "").strip().lower()
+    if not value:
+        errors.append(f"{key} is required")
+        return
+    if value not in allowed:
+        errors.append(f"{key} must be one of {sorted(allowed)}")
+
+
 # User value: prevents invalid input so users get reliable OCR/transcription outcomes.
 def validate_startup_env() -> None:
     errors: List[str] = []
@@ -93,6 +110,14 @@ def validate_startup_env() -> None:
 
     _validate_int_range("WORKER_MAX_INFLIGHT_OCR", errors, min_value=0, max_value=100)
     _validate_int_range("WORKER_MAX_INFLIGHT_TRANSCRIPTION", errors, min_value=0, max_value=100)
+    _validate_choice_env(
+        "WORKER_SCHEDULER_POLICY",
+        errors,
+        allowed={"fifo", "fair", "adaptive"},
+        default="adaptive",
+    )
+    _validate_int_range("WORKER_SCHEDULER_MAX_CONSECUTIVE", errors, min_value=1, max_value=100)
+    _validate_int_range("WORKER_SCHEDULER_ACTIVE_DEPTH_MIN", errors, min_value=0, max_value=100000)
     _validate_int_range("RETRY_BUDGET_TRANSIENT", errors, min_value=0, max_value=10)
     _validate_int_range("RETRY_BUDGET_MEDIA", errors, min_value=0, max_value=10)
     _validate_int_range("RETRY_BUDGET_DEFAULT", errors, min_value=0, max_value=10)
