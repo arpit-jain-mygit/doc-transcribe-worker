@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import os
+import random
 from datetime import datetime
 import socket
 import redis
@@ -75,6 +76,13 @@ RETRY_BUDGET_DEFAULT = int(os.getenv("RETRY_BUDGET_DEFAULT", "0"))
 
 BRPOP_TIMEOUT = 10              # seconds
 MAX_IDLE_BEFORE_RECONNECT = 60  # seconds (use 3600 in prod)
+INFLIGHT_REQUEUE_BACKOFF_BASE_SEC = float(os.getenv("INFLIGHT_REQUEUE_BACKOFF_BASE_SEC", "0.5"))
+INFLIGHT_REQUEUE_BACKOFF_MAX_SEC = float(os.getenv("INFLIGHT_REQUEUE_BACKOFF_MAX_SEC", "5.0"))
+INFLIGHT_REQUEUE_BACKOFF_JITTER_SEC = float(os.getenv("INFLIGHT_REQUEUE_BACKOFF_JITTER_SEC", "0.25"))
+INFLIGHT_STALE_SWEEP_INTERVAL_SEC = int(os.getenv("INFLIGHT_STALE_SWEEP_INTERVAL_SEC", "15"))
+_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+_requeue_hits: dict[str, int] = {}
+_last_inflight_sweep_ts: dict[str, float] = {}
 
 
 # =========================================================
@@ -149,6 +157,50 @@ def inflight_limit_for(job_type: str) -> int:
 def inflight_set_key(job_type: str) -> str:
     jt = job_type if job_type in {"OCR", "TRANSCRIPTION"} else "OTHER"
     return f"worker:inflight:{jt}"
+
+
+# User value: prevents hot requeue loops so queued jobs do not spin endlessly under inflight pressure.
+def next_requeue_delay(job_id: str) -> tuple[float, int]:
+    hits = int(_requeue_hits.get(job_id, 0)) + 1
+    _requeue_hits[job_id] = hits
+    base = max(0.05, INFLIGHT_REQUEUE_BACKOFF_BASE_SEC) * (2 ** max(0, hits - 1))
+    delay = min(max(0.05, INFLIGHT_REQUEUE_BACKOFF_MAX_SEC), base)
+    jitter = random.uniform(0.0, max(0.0, INFLIGHT_REQUEUE_BACKOFF_JITTER_SEC))
+    return round(delay + jitter, 3), hits
+
+
+# User value: clears per-job backoff state when a job proceeds or exits so future jobs are not penalized.
+def clear_requeue_state(job_id: str) -> None:
+    _requeue_hits.pop(job_id, None)
+
+
+# User value: cleans stale inflight entries so real queued jobs can start instead of waiting forever.
+def prune_stale_inflight_markers(r, inflight_key: str) -> int:
+    now = time.time()
+    last = float(_last_inflight_sweep_ts.get(inflight_key, 0.0))
+    if (now - last) < max(1, INFLIGHT_STALE_SWEEP_INTERVAL_SEC):
+        return int(r.scard(inflight_key) or 0)
+    _last_inflight_sweep_ts[inflight_key] = now
+
+    removed = 0
+    try:
+        members = list(r.smembers(inflight_key) or [])
+    except Exception:
+        members = []
+
+    for member_job_id in members:
+        try:
+            data = r.hgetall(f"job_status:{member_job_id}") or {}
+            status = str(data.get("status") or "").upper()
+            if not data or status in _TERMINAL_STATUSES:
+                r.srem(inflight_key, member_job_id)
+                removed += 1
+        except Exception:
+            continue
+
+    if removed > 0:
+        logger.warning("inflight_stale_cleanup key=%s removed=%s", inflight_key, removed)
+    return int(r.scard(inflight_key) or 0)
 
 
 # =========================================================
@@ -295,31 +347,40 @@ while True:
         max_allowed = inflight_limit_for(job_type)
         inflight_key = inflight_set_key(job_type)
         if max_allowed <= 0:
+            delay, hits = next_requeue_delay(job_id)
             logger.warning(
-                "Job %s blocked by zero inflight limit for type=%s queue=%s; requeueing",
+                "Job %s blocked by zero inflight limit for type=%s queue=%s; requeueing delay=%.2fs hits=%s",
                 job_id,
                 job_type,
                 queue,
+                delay,
+                hits,
             )
             r.rpush(queue, job_raw)
-            time.sleep(0.25)
+            time.sleep(delay)
             continue
         try:
             inflight_now = int(r.scard(inflight_key) or 0)
         except Exception:
             inflight_now = 0
         if inflight_now >= max_allowed:
+            inflight_now = prune_stale_inflight_markers(r, inflight_key)
+        if inflight_now >= max_allowed:
+            delay, hits = next_requeue_delay(job_id)
             logger.info(
-                "inflight_limit_hit type=%s limit=%s current=%s queue=%s job_id=%s requeue=true",
+                "inflight_limit_hit type=%s limit=%s current=%s queue=%s job_id=%s requeue=true delay=%.2fs hits=%s",
                 job_type,
                 max_allowed,
                 inflight_now,
                 queue,
                 job_id,
+                delay,
+                hits,
             )
             r.rpush(queue, job_raw)
-            time.sleep(0.25)
+            time.sleep(delay)
             continue
+        clear_requeue_state(job_id)
         r.sadd(inflight_key, job_id)
         r.expire(inflight_key, 86400)
         incr("worker_jobs_received_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
@@ -425,6 +486,7 @@ while True:
             r.srem(inflight_set_key(job_type), job_id)
         except Exception:
             logger.warning("Failed to clear inflight marker job_id=%s job_type=%s", job_id, job_type)
+        clear_requeue_state(job_id)
         incr("worker_jobs_completed_total", queue=queue, source=source_label, job_type=job.get("job_type", "UNKNOWN"))
         log_stage_event(job_id=job_id, request_id=request_id, stage="JOB_EXECUTION", event="COMPLETED")
         time.sleep(0.1)
@@ -436,6 +498,8 @@ while True:
             r.srem(inflight_set_key(jt), job_id)
         except Exception:
             logger.warning("Failed to clear inflight marker for cancelled job_id=%s", job_id if "job_id" in locals() else "UNKNOWN")
+        if "job_id" in locals():
+            clear_requeue_state(job_id)
         incr("worker_jobs_cancelled_total", queue=queue if "queue" in locals() else "UNKNOWN")
         log_stage_event(job_id=job_id, request_id=request_id if "request_id" in locals() else "", stage="JOB_EXECUTION", event="CANCELLED")
         try:
@@ -471,6 +535,8 @@ while True:
                 r.srem(inflight_set_key(jt), job_id)
         except Exception:
             logger.warning("Failed to clear inflight marker for failed job_id=%s", job_id if "job_id" in locals() else "UNKNOWN")
+        if "job_id" in locals():
+            clear_requeue_state(job_id)
         incr(
             "worker_jobs_failed_total",
             queue=queue if "queue" in locals() else "UNKNOWN",
