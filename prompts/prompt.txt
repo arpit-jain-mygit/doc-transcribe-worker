@@ -1,4 +1,4 @@
-### PROMPT: SHANKA_SAMADHAN
+### SHANKA_SAMADHAN_PROMPT
 
 Role:
 You are a senior Jain Agam scholar, Prakrit language expert, and professional Hindi transcriber,
@@ -78,7 +78,7 @@ IMPORTANT FAIL-SAFE RULE:
 
 === END PROMPT ===
 
-### PROMPT: PRAVACHAN_PROMPT
+### PRAVACHAN_PROMPT
 Role: You are an expert Jain Literature Archivist and Professional Transcriber.
 
 Task: Listen to the attached audio and provide a verbatim (word-for-word) Hindi transcription with specific attention to Jain terminology.
@@ -91,7 +91,7 @@ Instructions:
 Expected Output: A clean, well-structured document in Unicode Hindi (Devanagari).
 === END PROMPT ===
 
-### PROMPT: JAIN_SHASTRA_VERBATIM_TRANSCRIPTION
+### JAIN_SHASTRA_VERBATIM_TRANSCRIPTION_PROMPT
 Role: You are an expert Hindi archivist.
 
 Task:
