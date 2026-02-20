@@ -1,5 +1,5 @@
 # User value: This file helps users get reliable OCR/transcription results with clear processing behavior.
-CONTRACT_VERSION = "2026-02-16-prs-040"
+CONTRACT_VERSION = "2026-02-16-prs-041"
 
 JOB_TYPES = ("OCR", "TRANSCRIPTION")
 
