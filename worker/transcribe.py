@@ -156,15 +156,39 @@ def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
     with open(prompt_file, "r", encoding="utf-8") as f:
         content = f.read()
 
-    start = f"### PROMPT: {prompt_name}"
+    variants = [prompt_name, f"{prompt_name}_PROMPT"] if not str(prompt_name).endswith("_PROMPT") else [prompt_name]
+    start = ""
+    for name in variants:
+        for prefix in ("### PROMPT: ", "### "):
+            marker = f"{prefix}{name}"
+            if marker in content:
+                start = marker
+                break
+        if start:
+            break
     end = "=== END PROMPT ==="
 
-    if start not in content:
+    if not start:
         raise RuntimeError(f"Prompt '{prompt_name}' not found")
 
     return content.split(start, 1)[1].split(end, 1)[0].strip()
 
-AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
+DEFAULT_AUDIO_PROMPT = load_named_prompt(PROMPT_FILE, PROMPT_NAME)
+PRAVACHAN_PROMPT = load_named_prompt(PROMPT_FILE, "PRAVACHAN_PROMPT")
+try:
+    SHANKA_SAMADHAN_PROMPT = load_named_prompt(PROMPT_FILE, "SHANKA_SAMADHAN")
+except Exception:
+    SHANKA_SAMADHAN_PROMPT = load_named_prompt(PROMPT_FILE, "SHANKA_SAMADHAN_PROMPT")
+
+
+# User value: maps user-selected audio type to matching prompt for better transcript context.
+def resolve_audio_prompt(job: dict) -> str:
+    subtype = str(job.get("content_subtype") or "").strip().lower()
+    if subtype == "pravachan":
+        return PRAVACHAN_PROMPT
+    if subtype == "shanka_samadhan":
+        return SHANKA_SAMADHAN_PROMPT
+    return DEFAULT_AUDIO_PROMPT
 
 # =========================================================
 # UTILS
@@ -248,7 +272,7 @@ def split_audio(mp3_path: str) -> List[str]:
 # GEMINI ASR
 # =========================================================
 # User value: supports transcribe_chunk so the OCR/transcription journey stays clear and reliable.
-def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
+def transcribe_chunk(mp3_path: str, idx: int, total: int, prompt_text: str) -> str:
     log(f"Gemini ASR chunk {idx}/{total}")
 
     with open(mp3_path, "rb") as f:
@@ -259,7 +283,7 @@ def transcribe_chunk(mp3_path: str, idx: int, total: int) -> str:
     t0 = time.perf_counter()
     response = model.generate_content(
         [
-            Part.from_text(AUDIO_PROMPT),
+            Part.from_text(prompt_text),
             Part.from_data(audio_bytes, mime_type="audio/mpeg"),
         ],
         generation_config={"temperature": 0, "max_output_tokens": 8192},
@@ -296,6 +320,7 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
 
     chunks = split_audio(local_input)
     total = len(chunks)
+    prompt_text = resolve_audio_prompt(job)
 
     log(f"Transcription strategy chunk_duration_sec={CHUNK_DURATION_SEC} job_id={job_id}")
 
@@ -310,7 +335,7 @@ def run_transcription(job_id: str, job: dict, *, finalize: bool = True) -> dict:
             stage=f"Transcribing chunk {idx}/{total}",
             progress=10 + int((idx / total) * 80),
         )
-        text = transcribe_chunk(chunk, idx, total)
+        text = transcribe_chunk(chunk, idx, total, prompt_text)
         texts.append(text)
         chunk_duration_sec = round(len(AudioSegment.from_file(chunk)) / 1000.0, 2)
         seg_score, seg_metrics, seg_hints = score_segment(text)

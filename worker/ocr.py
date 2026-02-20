@@ -51,6 +51,7 @@ load_dotenv()
 PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 MODEL_NAME = "gemini-2.5-flash"
+PROMPT_FILE = os.getenv("PROMPT_FILE")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -65,6 +66,8 @@ def _env_int(name: str, default: int) -> int:
 
 OCR_DPI = _env_int("OCR_DPI", 300)
 OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
+OCR_PAGE_RETRIES = _env_int("OCR_PAGE_RETRIES", 2)
+OCR_ALLOW_EMPTY_PAGE_FALLBACK = str(os.getenv("OCR_ALLOW_EMPTY_PAGE_FALLBACK", "1")).strip().lower() not in ("0", "false", "no")
 
 if not PROJECT_ID:
     raise RuntimeError("GCP_PROJECT_ID not set")
@@ -72,6 +75,8 @@ if OCR_DPI < 72:
     raise RuntimeError("OCR_DPI must be >= 72")
 if OCR_PAGE_BATCH_SIZE < 0:
     raise RuntimeError("OCR_PAGE_BATCH_SIZE must be >= 0")
+if OCR_PAGE_RETRIES < 0:
+    raise RuntimeError("OCR_PAGE_RETRIES must be >= 0")
 
 # =========================================================
 # REDIS
@@ -110,6 +115,40 @@ Rules (STRICT):
 4. Begin output with: "=== Page {page} ==="
 5. Output ONLY verbatim transcription.
 """
+
+
+# User value: loads latest OCR/transcription data so users see current status.
+def load_named_prompt(prompt_file: str, prompt_name: str) -> str:
+    with open(prompt_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    variants = [prompt_name, f"{prompt_name}_PROMPT"] if not str(prompt_name).endswith("_PROMPT") else [prompt_name]
+    start = ""
+    for name in variants:
+        for prefix in ("### PROMPT: ", "### "):
+            marker = f"{prefix}{name}"
+            if marker in content:
+                start = marker
+                break
+        if start:
+            break
+    end = "=== END PROMPT ==="
+    if not start:
+        raise RuntimeError(f"Prompt '{prompt_name}' not found")
+    return content.split(start, 1)[1].split(end, 1)[0].strip()
+
+
+# User value: maps user-selected PDF type to deterministic OCR prompt behavior.
+def resolve_ocr_prompt(job: dict, page_num: int) -> str:
+    subtype = str(job.get("content_subtype") or "").strip().lower()
+    # Current requirement: both OCR subtypes share the same Jain shastra verbatim prompt.
+    if subtype in {"jain_literature", "general"} and PROMPT_FILE:
+        try:
+            prompt = load_named_prompt(PROMPT_FILE, "JAIN_SHASTRA_VERBATIM_TRANSCRIPTION")
+            return prompt.replace("{PAGE_NUMBER}", str(page_num)).replace("{page}", str(page_num))
+        except Exception:
+            pass
+    return PROMPT_TEMPLATE.format(page=page_num)
 
 # =========================================================
 # UTILS
@@ -226,7 +265,7 @@ def update(job_id: str, *, stage: str, progress: int, status: str = "PROCESSING"
 # GEMINI OCR
 # =========================================================
 # User value: supports gemini_ocr so the OCR/transcription journey stays clear and reliable.
-def gemini_ocr(image: Image.Image, page_num: int) -> str:
+def gemini_ocr(image: Image.Image, page_num: int, job: dict) -> str:
     png_bytes = pil_to_png_bytes(image)
     vertex_image = VertexImage.from_bytes(png_bytes)
 
@@ -235,7 +274,7 @@ def gemini_ocr(image: Image.Image, page_num: int) -> str:
 
     response = model.generate_content(
         [
-            Part.from_text(PROMPT_TEMPLATE.format(page=page_num)),
+            Part.from_text(resolve_ocr_prompt(job, page_num)),
             Part.from_image(vertex_image),
         ],
         generation_config={
@@ -252,6 +291,36 @@ def gemini_ocr(image: Image.Image, page_num: int) -> str:
         raise RuntimeError(f"Empty OCR output page {page_num}")
 
     return text
+
+
+# User value: retries transient empty-page model responses so one weak page does not fail full OCR job.
+def gemini_ocr_with_retries(image: Image.Image, page_num: int, job: dict) -> str:
+    last_err: Exception | None = None
+    attempts = OCR_PAGE_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return gemini_ocr(image, page_num, job)
+        except RuntimeError as exc:
+            last_err = exc
+            if "Empty OCR output page" not in str(exc):
+                raise
+            logger.warning(
+                "ocr_empty_page_retry job_page=%s attempt=%s/%s error=%s",
+                page_num,
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts:
+                time.sleep(min(1.5, 0.4 * attempt))
+                continue
+            if OCR_ALLOW_EMPTY_PAGE_FALLBACK:
+                logger.warning("ocr_empty_page_fallback job_page=%s using_placeholder=true", page_num)
+                return ""
+            raise
+    if last_err:
+        raise last_err
+    return ""
 
 # =========================================================
 # WORKER ENTRYPOINT
@@ -300,13 +369,15 @@ def run_ocr(job_id: str, job: dict) -> dict:
                 progress=10 + int((idx / total_pages) * 80),
             )
 
-            text = gemini_ocr(page, idx)
+            text = gemini_ocr_with_retries(page, idx, job)
             texts.append(text)
 
             page_score, page_metrics, page_hints = score_page(text, page)
             page_scores.append(page_score)
             if page_hints:
                 all_quality_hints.extend([f"Page {idx}: {hint}" for hint in page_hints])
+            if not text:
+                all_quality_hints.append(f"Page {idx}: OCR response was empty after retries")
 
             elapsed = time.perf_counter() - start
             avg = elapsed / max(1, processed_pages)
@@ -328,6 +399,11 @@ def run_ocr(job_id: str, job: dict) -> dict:
 
     ensure_not_cancelled(job_id, r=r)
     update(job_id, stage="Finalizing OCR", progress=95)
+
+    ocr_quality_score, low_confidence_pages = summarize_document_quality(
+        page_scores=page_scores,
+    )
+    quality_hints = all_quality_hints[:10]
 
     final_text = "\n\n".join(texts)
     output_filename = normalize_output_filename(job.get("output_filename") or job.get("filename"))
