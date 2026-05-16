@@ -68,6 +68,14 @@ OCR_DLQ_NAME = os.getenv("OCR_DLQ_NAME", "doc_jobs_ocr_dead")
 TRANSCRIPTION_QUEUE_NAME = os.getenv("TRANSCRIPTION_QUEUE_NAME", "doc_jobs_transcription")
 TRANSCRIPTION_DLQ_NAME = os.getenv("TRANSCRIPTION_DLQ_NAME", "doc_jobs_transcription_dead")
 
+logger.info(
+    "worker_gcp_config project_id=%s bucket=%s credentials_path=%s credentials_json_set=%s",
+    os.getenv("GCP_PROJECT_ID", ""),
+    os.getenv("GCS_BUCKET_NAME", ""),
+    os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
+    "1" if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") else "0",
+)
+
 WORKER_MAX_INFLIGHT_OCR = int(os.getenv("WORKER_MAX_INFLIGHT_OCR", "1"))
 WORKER_MAX_INFLIGHT_TRANSCRIPTION = int(os.getenv("WORKER_MAX_INFLIGHT_TRANSCRIPTION", "1"))
 RETRY_BUDGET_TRANSIENT = int(os.getenv("RETRY_BUDGET_TRANSIENT", "2"))

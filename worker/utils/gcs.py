@@ -99,10 +99,26 @@ def _get_client():
             # Support passing a credential file path in this env var.
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_env
             _client = storage.Client()
+            service_account_email = ""
+            try:
+                with open(creds_env, "r", encoding="utf-8") as f:
+                    service_account_email = str(json.load(f).get("client_email") or "")
+            except Exception:
+                pass
+            logger.info(
+                "gcp_identity source=GOOGLE_APPLICATION_CREDENTIALS_JSON_PATH project=%s service_account=%s",
+                getattr(_client, "project", "") or "",
+                service_account_email,
+            )
         else:
             creds = _parse_service_account_json(creds_env)
             if creds.get("type") == "service_account":
                 _client = storage.Client.from_service_account_info(creds)
+                logger.info(
+                    "gcp_identity source=GOOGLE_APPLICATION_CREDENTIALS_JSON project=%s service_account=%s",
+                    getattr(_client, "project", "") or "",
+                    str(creds.get("client_email") or ""),
+                )
             else:
                 raise RuntimeError(
                     "GOOGLE_APPLICATION_CREDENTIALS_JSON inline JSON is not a service account. "
@@ -110,6 +126,10 @@ def _get_client():
                 )
     else:
         _client = storage.Client()
+        logger.info(
+            "gcp_identity source=ADC project=%s service_account=",
+            getattr(_client, "project", "") or "",
+        )
 
     return _client
 
