@@ -499,9 +499,17 @@ Expected: all values appear.
 From worker repo directory:
 ```bash
 cd /Users/arpit/Documents/Codex/2026-04-30-import-repos-https-github-com-arpit/doc-transcribe-worker
+python3 -m venv .venv
+source .venv/bin/activate
+python --version
+pip install -r requirements.txt
 source ~/.zshrc
 python -m worker.worker_loop
 ```
+Important:
+- `python --version` must show `3.x` before running worker.
+- If you see Python `2.7`, stop and re-activate `.venv`.
+
 
 Verification:
 - Worker starts without startup env errors
