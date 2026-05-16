@@ -459,8 +459,8 @@ gcloud storage buckets list --project my-project-transcription-16may
 3. `REDIS_URL`
    - Open [Render Dashboard](https://dashboard.render.com/)
    - Open Redis service `doc-transcribe-redis`
-   - Copy internal connection string from `Connect`/`Info`
-   - Use that value as `REDIS_URL`
+   - Copy **external** connection string from `Connect`/`Info` (local machine cannot access Render private internal network)
+   - Use external `rediss://...` value as local worker `REDIS_URL`
 4. `QUEUE_MODE`
    - Use `single` for this setup (one queue for worker consumption)
    - Source: worker runtime configuration in this guide (local worker mode)
