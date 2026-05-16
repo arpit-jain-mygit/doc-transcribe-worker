@@ -220,11 +220,17 @@ If it still fails, continue setup and treat this as optional quota-alignment (no
 2. Link your new project to billing account (free tier credits are okay)
 3. If you see a red banner saying account must be verified, click `Verify account` and complete verification.
 4. After verification, open `Billing` -> `Account management` -> `Projects linked` and confirm your project is listed.
+5. If you see `No active billing accounts`:
+   - Click `Manage billing accounts`
+   - Create a new billing account (Individual profile)
+   - Complete payment profile and payment method verification
+   - Return to project billing page and click `Link a billing account`
+   - Select the newly active billing account
 
 Verification:
 1. Red verification banner is no longer shown.
 2. Billing page shows project linked.
-2. CLI:
+3. CLI:
 ```bash
 gcloud beta billing projects describe my-project-transcription-16may
 ```
