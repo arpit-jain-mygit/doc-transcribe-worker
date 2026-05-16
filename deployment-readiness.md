@@ -419,6 +419,13 @@ Verification:
 - API logs include GCP identity/config lines:
   - `api_gcp_config bucket=... credentials_path=... credentials_json_set=...`
   - `gcp_identity source=... project=... service_account=...`
+ - Exact strings to search in API logs:
+   - `api_gcp_config`
+   - `gcp_identity source=`
+ - Example command (if logs are saved locally):
+```bash
+grep -E "api_gcp_config|gcp_identity source=" /tmp/api.log
+```
 
 ## 3) Vercel Setup (UI)
 
@@ -521,6 +528,13 @@ Verification:
 - Worker logs include GCP identity/config lines:
   - `worker_gcp_config project_id=... bucket=... credentials_path=... credentials_json_set=...`
   - `gcp_identity source=... project=... service_account=...`
+ - Exact strings to search in worker logs:
+   - `worker_gcp_config`
+   - `gcp_identity source=`
+ - Example command:
+```bash
+grep -E "worker_gcp_config|gcp_identity source=" /tmp/worker-live.log
+```
 
 ---
 
