@@ -461,6 +461,15 @@ gcloud storage buckets list --project my-project-transcription-16may
    - Open Redis service `doc-transcribe-redis`
    - Copy internal connection string from `Connect`/`Info`
    - Use that value as `REDIS_URL`
+4. `QUEUE_MODE`
+   - Use `single` for this setup (one queue for worker consumption)
+   - Source: worker runtime configuration in this guide (local worker mode)
+5. `QUEUE_NAME`
+   - Use `doc_jobs`
+   - Source: keep same value as API env var `QUEUE_NAME` in Render step `2.2`
+6. `DLQ_NAME`
+   - Use `doc_jobs_dead`
+   - Source: worker single-queue DLQ convention used in this setup
 
 Add to `~/.zshrc`:
 ```bash
