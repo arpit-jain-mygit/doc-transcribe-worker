@@ -81,6 +81,30 @@ Expected:
 - active account is your GCP user
 - a default project is set
 
+#### 1.1.4 Verify exactly which GCP account `gcloud` is using
+Print active account:
+```bash
+gcloud config get-value account
+```
+
+Print all authenticated accounts:
+```bash
+gcloud auth list
+```
+
+Print active project:
+```bash
+gcloud config get-value project
+```
+
+Optional deep check (identity email from access token):
+```bash
+gcloud auth print-access-token | awk '{print "token_generated"}'
+```
+Expected:
+- `gcloud config get-value account` shows the account you intend to use
+- In `gcloud auth list`, active account has `*`
+
 ---
 
 ### 1.2 Create/select GCP project
@@ -363,4 +387,3 @@ Verification:
 
 - API upload 200 but worker fails:
   - API and worker env mismatch (`GCS_BUCKET_NAME`, `GCP_PROJECT_ID`, credentials)
-
