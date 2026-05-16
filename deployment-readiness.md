@@ -371,26 +371,43 @@ Verification:
 ## 2) Render Setup (API + Redis Only)
 
 ### 2.1 Create Redis service
-1. Render dashboard -> `New` -> `Redis`
-2. Name: `doc-transcribe-redis`
-3. Create and copy internal `REDIS_URL`
+1. Open [Render Dashboard](https://dashboard.render.com/).
+2. Select the correct workspace/team (top-left workspace selector).
+3. Click `New +` -> `Redis`.
+4. Configure:
+   - Name: `doc-transcribe-redis`
+   - Region: choose nearest region to your users/workers
+   - Plan: select suitable plan (starter is fine for initial setup)
+5. Click `Create Redis`.
+6. Open created Redis service page -> `Connect` / `Info`.
+7. Copy internal connection string (`REDIS_URL`) for API + local worker use.
 
 Verification:
 - Redis service status is `Available`
 - `REDIS_URL` visible in Render
 
 ### 2.2 Create API service (`doc-transcribe-api`)
-1. Render -> `New` -> `Web Service`
-2. Connect repo `doc-transcribe-api`
-3. Configure build/start command per repo
-4. Add env vars:
+1. Open [Render Dashboard](https://dashboard.render.com/).
+2. Confirm same workspace/team where Redis was created.
+3. Click `New +` -> `Web Service`.
+4. Connect Git provider (GitHub) if not already connected.
+5. Select repository `doc-transcribe-api`.
+6. Configure web service:
+   - Name: `doc-transcribe-api`
+   - Branch: `main`
+   - Region: same or nearby region as Redis
+   - Runtime: Python
+   - Build command: as defined in repo
+   - Start command: as defined in repo
+7. Open `Environment` section and add env vars:
    - `GCP_PROJECT_ID=my-project-transcription-16may`
    - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
    - `REDIS_URL=<from Render Redis>`
    - `QUEUE_NAME=doc_jobs`
    - `CORS_ALLOW_ORIGINS=<your vercel domain>`
    - `GOOGLE_APPLICATION_CREDENTIALS_JSON=<contents of SA JSON OR path strategy used by your runtime>`
-5. Deploy
+8. Click `Create Web Service` / `Deploy`.
+9. After first deploy, open service `Logs` and `Events`.
 
 Verification:
 - Deploy logs succeed
