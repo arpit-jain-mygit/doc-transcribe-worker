@@ -140,9 +140,14 @@ Expected:
 ### 1.2 Create/select GCP project
 1. Open [Google Cloud Console](https://console.cloud.google.com/)
 2. Top bar project selector -> `New Project`
-3. Project name: `my-project-transcription-12May` (or your final name)
-4. Click `Create`
-5. Select this project as active
+3. `Project name`: `my-project-transcription-12May` (or your final name)
+4. `Organization` / `Parent resource` selection:
+   - If this is personal free-tier setup, choose `No organization` (or parent resource shown as your user).
+   - If your account shows an organization/folder dropdown and you do not intend org-managed setup, switch to personal/no-org scope.
+   - If you must use org-managed setup, select the correct `Organization` and then correct `Folder` parent resource as instructed by your admin.
+5. Optionally set custom `Project ID` now (recommended lowercase, e.g. `my-project-transcription-12may`)
+6. Click `Create`
+7. Select this project as active in top project selector
 
 Verification:
 - Console top bar shows selected project
@@ -160,6 +165,13 @@ gcloud config set project <your-project-id>
 gcloud config get-value project
 ```
 Expected: output is your lowercase project ID.
+
+If project is not visible in CLI, confirm account + parent scope:
+```bash
+gcloud config get-value account
+gcloud auth list
+```
+Expected: active account is the same account used in Console where project was created.
 
 If you see ADC quota warning, align it:
 ```bash
