@@ -90,6 +90,7 @@ def run_with_retry(
     retryable: Iterable[type[BaseException]],
     policy: RetryPolicy,
     on_retry: Callable[[int, BaseException], None] | None = None,
+    should_retry: Callable[[BaseException], bool] | None = None,
 ) -> T:
     retryable_tuple = tuple(retryable)
     attempt = 0
@@ -97,6 +98,8 @@ def run_with_retry(
         try:
             return fn()
         except retryable_tuple as exc:
+            if should_retry is not None and not should_retry(exc):
+                raise
             if attempt >= policy.max_retries:
                 raise
             attempt += 1

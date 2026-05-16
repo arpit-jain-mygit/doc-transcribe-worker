@@ -24,6 +24,25 @@ _client = None
 logger = logging.getLogger(__name__)
 
 
+def _should_retry_gcs_error(exc: BaseException) -> bool:
+    """
+    Retry only likely-transient GCS failures.
+    Authn/authz failures (401/403) are permanent until credentials/IAM change.
+    """
+    status_code = getattr(exc, "code", None)
+    if status_code in (401, 403):
+        return False
+
+    msg = str(exc).lower()
+    if "status code', 401" in msg or "status code', 403" in msg:
+        return False
+    if "permission denied" in msg or "does not have storage.objects.get" in msg:
+        return False
+    if "invalid credentials" in msg or "unauthorized" in msg:
+        return False
+    return True
+
+
 # User value: improves reliability when OCR/transcription dependencies fail transiently.
 def _retry_io(operation: str, target: str, fn):
     start = time.perf_counter()
@@ -52,6 +71,7 @@ def _retry_io(operation: str, target: str, fn):
             retryable=(Exception,),
             policy=GCS_POLICY,
             on_retry=_on_retry,
+            should_retry=_should_retry_gcs_error,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         observe_ms("worker_gcs_io_latency_ms", elapsed_ms, operation=operation, retries=attempt)
@@ -72,14 +92,63 @@ def _get_client():
     if _client is not None:
         return _client
 
-    creds_b64 = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    if creds_b64:
-        creds = json.loads(base64.b64decode(creds_b64))
-        _client = storage.Client.from_service_account_info(creds)
+    creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if creds_env:
+        creds_env = creds_env.strip()
+        if os.path.isfile(creds_env):
+            # Support passing a credential file path in this env var.
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_env
+            _client = storage.Client()
+        else:
+            creds = _parse_service_account_json(creds_env)
+            if creds.get("type") == "service_account":
+                _client = storage.Client.from_service_account_info(creds)
+            else:
+                raise RuntimeError(
+                    "GOOGLE_APPLICATION_CREDENTIALS_JSON inline JSON is not a service account. "
+                    "Use a service-account JSON payload, or set this env var to a credential file path."
+                )
     else:
         _client = storage.Client()
 
     return _client
+
+
+def _parse_service_account_json(creds_env: str) -> dict:
+    """
+    Parse service-account credentials from env.
+    Supports:
+    1) Raw JSON object string
+    2) Base64-encoded JSON object string
+    """
+    raw = (creds_env or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "GOOGLE_APPLICATION_CREDENTIALS_JSON is set but blank. "
+            "Use raw JSON service-account content or base64-encoded JSON."
+        )
+
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    padded = raw + "=" * (-len(raw) % 4)
+    try:
+        decoded = base64.b64decode(padded, validate=False)
+        parsed = json.loads(decoded.decode("utf-8"))
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON. "
+        "Expected one of: (1) raw JSON, (2) base64-encoded JSON, or (3) a path to a JSON credential file."
+    )
 
 
 # ---------------------------------------------------------
