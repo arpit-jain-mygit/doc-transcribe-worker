@@ -179,6 +179,10 @@ gcloud auth application-default set-quota-project <your-project-id>
 ```
 
 ### 1.2.1 Use the new account in `gcloud` config
+Account reference in this guide:
+- Email login: `sachin.arpit.gcp.may2026@gmail.com`
+- Account label/handle: `sachin.arpit.gcp.may2026`
+
 1. Login with the new account in CLI:
 ```bash
 gcloud auth login sachin.arpit.gcp.may2026@gmail.com
@@ -199,6 +203,7 @@ gcloud config set project <your-project-id>
 Verification:
 1. `gcloud config get-value account` returns `sachin.arpit.gcp.may2026@gmail.com`
 2. `gcloud config get-value project` returns your intended projectId
+3. In `gcloud auth list`, active account label should correspond to `sachin.arpit.gcp.may2026`
 
 ---
 
