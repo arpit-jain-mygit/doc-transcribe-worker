@@ -368,7 +368,7 @@ Verification:
 
 ---
 
-## 2) Render Setup (API + Worker)
+## 2) Render Setup (API + Redis Only)
 
 ### 2.1 Create Redis service
 1. Render dashboard -> `New` -> `Redis`
@@ -396,28 +396,6 @@ Verification:
 - Deploy logs succeed
 - API health endpoint returns 200
 
-### 2.3 Create Worker service (`doc-transcribe-worker`)
-1. Render -> `New` -> `Background Worker`
-2. Connect repo `doc-transcribe-worker`
-3. Set start command per repo
-4. Add env vars:
-   - `GCP_PROJECT_ID=my-project-transcription-16may`
-   - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
-   - `REDIS_URL=<from Render Redis>`
-   - `QUEUE_MODE=single`
-   - `QUEUE_NAME=doc_jobs`
-   - `DLQ_NAME=doc_jobs_dead`
-   - `PROMPT_FILE=prompts/prompt.txt`
-   - `PROMPT_NAME=PRAVACHAN_PROMPT`
-   - `GOOGLE_APPLICATION_CREDENTIALS_JSON=<same credential strategy as API>`
-5. Deploy
-
-Verification:
-- Worker startup logs show env validation success
-- No credential parse errors
-
----
-
 ## 3) Vercel Setup (UI)
 
 1. Vercel -> `Add New Project`
@@ -435,7 +413,9 @@ Verification:
 
 ---
 
-## 4) Local Worker `.zshrc` Setup
+## 4) Local Worker Setup (Not on Render)
+
+### 4.1 Local worker `.zshrc` setup
 
 Add to `~/.zshrc`:
 ```bash
@@ -460,6 +440,19 @@ Verification:
 env | rg "GCP_PROJECT_ID|GCS_BUCKET_NAME|QUEUE_NAME|DLQ_NAME|GOOGLE_APPLICATION_CREDENTIALS"
 ```
 Expected: all values appear.
+
+### 4.2 Start worker locally
+From worker repo directory:
+```bash
+cd /Users/arpit/Documents/Codex/2026-04-30-import-repos-https-github-com-arpit/doc-transcribe-worker
+source ~/.zshrc
+python -m worker.worker_loop
+```
+
+Verification:
+- Worker starts without startup env errors
+- Logs show queue polling started
+- On job submission, logs show job picked and processed
 
 ---
 
