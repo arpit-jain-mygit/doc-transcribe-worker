@@ -416,6 +416,9 @@ Verification:
 Verification:
 - Deploy logs succeed
 - API health endpoint returns 200
+- API logs include GCP identity/config lines:
+  - `api_gcp_config bucket=... credentials_path=... credentials_json_set=...`
+  - `gcp_identity source=... project=... service_account=...`
 
 ## 3) Vercel Setup (UI)
 
@@ -515,6 +518,9 @@ Verification:
 - Worker starts without startup env errors
 - Logs show queue polling started
 - On job submission, logs show job picked and processed
+- Worker logs include GCP identity/config lines:
+  - `worker_gcp_config project_id=... bucket=... credentials_path=... credentials_json_set=...`
+  - `gcp_identity source=... project=... service_account=...`
 
 ---
 
