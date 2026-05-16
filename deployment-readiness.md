@@ -13,6 +13,38 @@ Assumptions:
 
 ---
 
+## 0) Create a Fresh Free-Tier GCP Account (Important First Step)
+
+Use this if your old account is locked to organization verification.
+
+### 0.1 Create a new Gmail account
+1. Open [Create Google Account](https://accounts.google.com/signup)
+2. Create a fresh Gmail account dedicated for this project
+3. Complete phone/email verification
+
+Verification:
+1. You can sign in successfully to Gmail with the new account
+
+### 0.2 Start free-tier signup in Incognito mode
+1. Open a new Incognito/Private browser window
+2. Go to [Google Cloud Free Tier](https://cloud.google.com/free)
+3. Click `Get started for free`
+4. Sign in using the new Gmail account
+
+Verification:
+1. Free-tier onboarding page opens for the new account
+
+### 0.3 Ensure billing profile type is Individual
+1. During onboarding, choose `Individual` profile type (not Organization)
+2. Add personal details and payment method
+3. Complete verification prompts
+
+Verification:
+1. Free trial credits are visible in Cloud Console
+2. No forced organization-document flow is shown
+
+---
+
 ## 1) GCP Setup (Detailed + Verification After Each Step)
 
 ### 1.1 Install prerequisites on macOS
