@@ -140,12 +140,12 @@ Expected:
 ### 1.2 Create/select GCP project
 1. Open [Google Cloud Console](https://console.cloud.google.com/)
 2. Top bar project selector -> `New Project`
-3. `Project name`: `my-project-transcription-12May` (or your final name)
+3. `Project name`: `my-project-transcription-16may` (or your final name)
 4. `Organization` / `Parent resource` selection:
    - If this is personal free-tier setup, choose `No organization` (or parent resource shown as your user).
    - If your account shows an organization/folder dropdown and you do not intend org-managed setup, switch to personal/no-org scope.
    - If you must use org-managed setup, select the correct `Organization` and then correct `Folder` parent resource as instructed by your admin.
-5. Optionally set custom `Project ID` now (recommended lowercase, e.g. `my-project-transcription-12may`)
+5. Optionally set custom `Project ID` now (recommended lowercase, e.g. `my-project-transcription-16may`)
 6. Click `Create`
 7. Select this project as active in top project selector
 
@@ -157,7 +157,7 @@ gcloud projects list --format="table(projectId,name)"
 ```
 Important:
 - `gcloud config set project` expects **projectId**, not project display name.
-- Project IDs are usually lowercase (example: `my-project-transcription-12may`).
+- Project IDs are usually lowercase (example: `my-project-transcription-16may`).
 
 Set active project using **projectId**:
 ```bash
@@ -213,7 +213,7 @@ Verification:
 2. Billing page shows project linked.
 2. CLI:
 ```bash
-gcloud beta billing projects describe my-project-transcription-12May
+gcloud beta billing projects describe my-project-transcription-16may
 ```
 Expected: `billingEnabled: true`
 
@@ -222,14 +222,14 @@ Expected: `billingEnabled: true`
 ### 1.4 Enable required APIs
 Enable APIs:
 ```bash
-gcloud services enable storage.googleapis.com --project=my-project-transcription-12May
-gcloud services enable aiplatform.googleapis.com --project=my-project-transcription-12May
+gcloud services enable storage.googleapis.com --project=my-project-transcription-16may
+gcloud services enable aiplatform.googleapis.com --project=my-project-transcription-16may
 ```
 If your worker uses specific generative APIs, enable those too per your model/provider.
 
 Verification:
 ```bash
-gcloud services list --enabled --project=my-project-transcription-12May | rg "storage|aiplatform"
+gcloud services list --enabled --project=my-project-transcription-16may | rg "storage|aiplatform"
 ```
 Expected: both services appear.
 
@@ -237,20 +237,20 @@ Expected: both services appear.
 
 ### 1.5 Create GCS bucket
 Pick globally unique bucket name, example:
-- `my-project-transcription-12may-output`
+- `my-project-transcription-16may-output`
 
 Create:
 ```bash
-gcloud storage buckets create gs://my-project-transcription-12may-output \
-  --project=my-project-transcription-12May \
+gcloud storage buckets create gs://my-project-transcription-16may-output \
+  --project=my-project-transcription-16may \
   --location=asia-south1 \
   --uniform-bucket-level-access
 ```
 
 Verification:
 ```bash
-gcloud storage buckets list --project=my-project-transcription-12May
-gcloud storage ls gs://my-project-transcription-12may-output
+gcloud storage buckets list --project=my-project-transcription-16may
+gcloud storage ls gs://my-project-transcription-16may-output
 ```
 Expected: bucket is listed and accessible.
 
@@ -260,13 +260,13 @@ Expected: bucket is listed and accessible.
 Create SA:
 ```bash
 gcloud iam service-accounts create doc-transcribe-runtime \
-  --project=my-project-transcription-12May \
+  --project=my-project-transcription-16may \
   --display-name="Doc Transcribe Runtime"
 ```
 
 Verification:
 ```bash
-gcloud iam service-accounts list --project=my-project-transcription-12May | rg doc-transcribe-runtime
+gcloud iam service-accounts list --project=my-project-transcription-16may | rg doc-transcribe-runtime
 ```
 Expected: service account appears.
 
@@ -275,8 +275,8 @@ Expected: service account appears.
 ### 1.7 Grant IAM roles to service account
 Set variables:
 ```bash
-PROJECT_ID="my-project-transcription-12May"
-BUCKET_NAME="my-project-transcription-12may-output"
+PROJECT_ID="my-project-transcription-16may"
+BUCKET_NAME="my-project-transcription-16may-output"
 SA_EMAIL="doc-transcribe-runtime@${PROJECT_ID}.iam.gserviceaccount.com"
 ```
 
@@ -332,8 +332,8 @@ Expected:
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.gcp-keys/doc-transcribe-runtime.json"
 echo "healthcheck $(date)" > /tmp/gcs-healthcheck.txt
-gcloud storage cp /tmp/gcs-healthcheck.txt gs://my-project-transcription-12may-output/healthcheck.txt
-gcloud storage cp gs://my-project-transcription-12may-output/healthcheck.txt /tmp/gcs-healthcheck-downloaded.txt
+gcloud storage cp /tmp/gcs-healthcheck.txt gs://my-project-transcription-16may-output/healthcheck.txt
+gcloud storage cp gs://my-project-transcription-16may-output/healthcheck.txt /tmp/gcs-healthcheck-downloaded.txt
 cat /tmp/gcs-healthcheck-downloaded.txt
 ```
 
@@ -360,8 +360,8 @@ Verification:
 2. Connect repo `doc-transcribe-api`
 3. Configure build/start command per repo
 4. Add env vars:
-   - `GCP_PROJECT_ID=my-project-transcription-12May`
-   - `GCS_BUCKET_NAME=my-project-transcription-12may-output`
+   - `GCP_PROJECT_ID=my-project-transcription-16may`
+   - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
    - `REDIS_URL=<from Render Redis>`
    - `QUEUE_NAME=doc_jobs`
    - `CORS_ALLOW_ORIGINS=<your vercel domain>`
@@ -377,8 +377,8 @@ Verification:
 2. Connect repo `doc-transcribe-worker`
 3. Set start command per repo
 4. Add env vars:
-   - `GCP_PROJECT_ID=my-project-transcription-12May`
-   - `GCS_BUCKET_NAME=my-project-transcription-12may-output`
+   - `GCP_PROJECT_ID=my-project-transcription-16may`
+   - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
    - `REDIS_URL=<from Render Redis>`
    - `QUEUE_MODE=single`
    - `QUEUE_NAME=doc_jobs`
@@ -415,8 +415,8 @@ Verification:
 
 Add to `~/.zshrc`:
 ```bash
-export GCP_PROJECT_ID="my-project-transcription-12May"
-export GCS_BUCKET_NAME="my-project-transcription-12may-output"
+export GCP_PROJECT_ID="my-project-transcription-16may"
+export GCS_BUCKET_NAME="my-project-transcription-16may-output"
 export REDIS_URL="rediss://<your-render-redis-url>"
 export QUEUE_MODE="single"
 export QUEUE_NAME="doc_jobs"
