@@ -141,9 +141,12 @@ gcloud auth application-default set-quota-project <your-project-id>
 ### 1.3 Enable billing
 1. Console -> `Billing`
 2. Link your new project to billing account (free tier credits are okay)
+3. If you see a red banner saying account must be verified, click `Verify account` and complete verification.
+4. After verification, open `Billing` -> `Account management` -> `Projects linked` and confirm your project is listed.
 
 Verification:
-1. Billing page shows project linked
+1. Red verification banner is no longer shown.
+2. Billing page shows project linked.
 2. CLI:
 ```bash
 gcloud beta billing projects describe my-project-transcription-12May
