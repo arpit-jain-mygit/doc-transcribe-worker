@@ -118,10 +118,23 @@ Verification:
 - Console top bar shows selected project
 - CLI:
 ```bash
-gcloud config set project my-project-transcription-12May
+gcloud projects list --format="table(projectId,name)"
+```
+Important:
+- `gcloud config set project` expects **projectId**, not project display name.
+- Project IDs are usually lowercase (example: `my-project-transcription-12may`).
+
+Set active project using **projectId**:
+```bash
+gcloud config set project <your-project-id>
 gcloud config get-value project
 ```
-Expected: `my-project-transcription-12May`
+Expected: output is your lowercase project ID.
+
+If you see ADC quota warning, align it:
+```bash
+gcloud auth application-default set-quota-project <your-project-id>
+```
 
 ---
 
