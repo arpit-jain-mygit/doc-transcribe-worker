@@ -422,10 +422,15 @@ Verification:
 1. Vercel -> `Add New Project`
 2. Import `doc-transcribe-ui` repo
 3. Keep framework/build settings as required by repo
-4. Add env vars:
-   - `API_BASE_URL=https://<your-api-service>.onrender.com`
+4. Get `API_BASE_URL` from Render API service:
+   - Open [Render Dashboard](https://dashboard.render.com/)
+   - Open service `doc-transcribe-api`
+   - Copy public service URL from the service overview (example: `https://doc-transcribe-api.onrender.com`)
+   - Use this exact value as `API_BASE_URL`
+5. Add env vars:
+   - `API_BASE_URL=<copied Render API URL>`
    - Any auth vars used by UI (example Google client ID)
-5. Deploy
+6. Deploy
 
 Verification:
 - UI URL opens
@@ -437,6 +442,25 @@ Verification:
 ## 4) Local Worker Setup (Not on Render)
 
 ### 4.1 Local worker `.zshrc` setup
+
+Get values first:
+1. `GCP_PROJECT_ID`
+   - Run:
+```bash
+gcloud config get-value project
+```
+   - Use returned value (example: `my-project-transcription-16may`)
+2. `GCS_BUCKET_NAME`
+   - Use bucket created in step `1.5` (example: `my-project-transcription-16may-output`)
+   - Verify:
+```bash
+gcloud storage buckets list --project my-project-transcription-16may
+```
+3. `REDIS_URL`
+   - Open [Render Dashboard](https://dashboard.render.com/)
+   - Open Redis service `doc-transcribe-redis`
+   - Copy internal connection string from `Connect`/`Info`
+   - Use that value as `REDIS_URL`
 
 Add to `~/.zshrc`:
 ```bash
