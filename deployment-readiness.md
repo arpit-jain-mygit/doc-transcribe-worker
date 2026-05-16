@@ -177,6 +177,17 @@ If you see ADC quota warning, align it:
 ```bash
 gcloud auth application-default set-quota-project <your-project-id>
 ```
+If you get:
+`Cannot add the project ... because ADC does not have serviceusage.services.use`
+then do:
+```bash
+gcloud auth application-default login
+```
+Sign in with `sachin.arpit.gcp.may2026@gmail.com`, then retry:
+```bash
+gcloud auth application-default set-quota-project <your-project-id>
+```
+If it still fails, continue setup and treat this as optional quota-alignment (not a hard blocker), then ask project admin to grant required permission (`serviceusage.services.use`).
 
 ### 1.2.1 Use the new account in `gcloud` config
 Account reference in this guide:
