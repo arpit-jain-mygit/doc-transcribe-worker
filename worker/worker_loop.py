@@ -4,6 +4,7 @@ import time
 import logging
 import os
 import random
+import subprocess
 from datetime import datetime
 import socket
 import redis
@@ -75,6 +76,25 @@ logger.info(
     os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
     "1" if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") else "0",
 )
+
+
+def _detect_gcloud_account() -> str:
+    try:
+        out = subprocess.check_output(
+            ["gcloud", "config", "get-value", "account"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            text=True,
+        )
+        value = str(out).strip()
+        if value and value != "(unset)":
+            return value
+    except Exception:
+        pass
+    return ""
+
+
+logger.info("gcloud_active_account=%s", _detect_gcloud_account())
 
 WORKER_MAX_INFLIGHT_OCR = int(os.getenv("WORKER_MAX_INFLIGHT_OCR", "1"))
 WORKER_MAX_INFLIGHT_TRANSCRIPTION = int(os.getenv("WORKER_MAX_INFLIGHT_TRANSCRIPTION", "1"))

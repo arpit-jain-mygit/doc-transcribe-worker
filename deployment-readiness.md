@@ -416,15 +416,17 @@ Verification:
 Verification:
 - Deploy logs succeed
 - API health endpoint returns 200
-- API logs include GCP identity/config lines:
-  - `api_gcp_config bucket=... credentials_path=... credentials_json_set=...`
-  - `gcp_identity source=... project=... service_account=...`
+ - API logs include GCP identity/config lines:
+   - `api_gcp_config bucket=... credentials_path=... credentials_json_set=...`
+   - `gcloud_active_account=...`
+   - `gcp_identity source=... project=... service_account=...`
  - Exact strings to search in API logs:
    - `api_gcp_config`
+   - `gcloud_active_account=`
    - `gcp_identity source=`
  - Example command (if logs are saved locally):
 ```bash
-grep -E "api_gcp_config|gcp_identity source=" /tmp/api.log
+grep -E "api_gcp_config|gcloud_active_account=|gcp_identity source=" /tmp/api.log
 ```
 
 ## 3) Vercel Setup (UI)
@@ -525,15 +527,17 @@ Verification:
 - Worker starts without startup env errors
 - Logs show queue polling started
 - On job submission, logs show job picked and processed
-- Worker logs include GCP identity/config lines:
-  - `worker_gcp_config project_id=... bucket=... credentials_path=... credentials_json_set=...`
-  - `gcp_identity source=... project=... service_account=...`
+ - Worker logs include GCP identity/config lines:
+   - `worker_gcp_config project_id=... bucket=... credentials_path=... credentials_json_set=...`
+   - `gcloud_active_account=...`
+   - `gcp_identity source=... project=... service_account=...`
  - Exact strings to search in worker logs:
    - `worker_gcp_config`
+   - `gcloud_active_account=`
    - `gcp_identity source=`
  - Example command:
 ```bash
-grep -E "worker_gcp_config|gcp_identity source=" /tmp/worker-live.log
+grep -E "worker_gcp_config|gcloud_active_account=|gcp_identity source=" /tmp/worker-live.log
 ```
 
 ---
