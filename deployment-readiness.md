@@ -137,7 +137,31 @@ Expected:
 
 ---
 
-### 1.2 Create/select GCP project
+### 1.2 Use the new account in `gcloud` config
+Account reference in this guide:
+- Email login: `sachin.arpit.gcp.may2026@gmail.com`
+- Account label/handle: `sachin.arpit.gcp.may2026`
+
+1. Login with the new account in CLI:
+```bash
+gcloud auth login sachin.arpit.gcp.may2026@gmail.com
+```
+2. Set active account:
+```bash
+gcloud config set account sachin.arpit.gcp.may2026@gmail.com
+```
+3. Confirm active account:
+```bash
+gcloud auth list
+gcloud config get-value account
+```
+4. Continue to step `1.2.1` to create/select project.
+
+Verification:
+1. `gcloud config get-value account` returns `sachin.arpit.gcp.may2026@gmail.com`
+2. In `gcloud auth list`, active account label should correspond to `sachin.arpit.gcp.may2026`
+
+### 1.2.1 Create/select GCP project
 1. Open [Google Cloud Console](https://console.cloud.google.com/)
 2. Top bar project selector -> `New Project`
 3. `Project name`: `my-project-transcription-16may` (or your final name)
@@ -188,30 +212,6 @@ Sign in with `sachin.arpit.gcp.may2026@gmail.com`, then retry:
 gcloud auth application-default set-quota-project <your-project-id>
 ```
 If it still fails, continue setup and treat this as optional quota-alignment (not a hard blocker), then ask project admin to grant required permission (`serviceusage.services.use`).
-
-### 1.2.1 Use the new account in `gcloud` config
-Account reference in this guide:
-- Email login: `sachin.arpit.gcp.may2026@gmail.com`
-- Account label/handle: `sachin.arpit.gcp.may2026`
-
-1. Login with the new account in CLI:
-```bash
-gcloud auth login sachin.arpit.gcp.may2026@gmail.com
-```
-2. Set active account:
-```bash
-gcloud config set account sachin.arpit.gcp.may2026@gmail.com
-```
-3. Confirm active account:
-```bash
-gcloud auth list
-gcloud config get-value account
-```
-4. Return to step `1.2` to set active project using projectId.
-
-Verification:
-1. `gcloud config get-value account` returns `sachin.arpit.gcp.may2026@gmail.com`
-2. In `gcloud auth list`, active account label should correspond to `sachin.arpit.gcp.may2026`
 
 ---
 
