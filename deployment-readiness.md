@@ -400,7 +400,6 @@ Verification:
    - Build command: as defined in repo
    - Start command: as defined in repo
 7. Open `Environment` section and add env vars:
-   - `GCP_PROJECT_ID=my-project-transcription-16may`
    - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
    - `REDIS_URL=<from Render Redis>`
    - `QUEUE_NAME=doc_jobs`
