@@ -399,14 +399,26 @@ Verification:
    - Runtime: Python
    - Build command: as defined in repo
    - Start command: as defined in repo
-7. Open `Environment` section and add env vars:
+7. Prepare `GOOGLE_APPLICATION_CREDENTIALS_JSON` value (required by API code):
+   - Source file: `~/.gcp-keys/doc-transcribe-runtime.json` (created in step `1.8`)
+   - API expects this value as **base64-encoded JSON string**
+   - Generate one-line base64 string:
+```bash
+base64 < ~/.gcp-keys/doc-transcribe-runtime.json | tr -d '\n' > /tmp/gcp_sa_b64.txt
+```
+   - Verify decode works:
+```bash
+cat /tmp/gcp_sa_b64.txt | base64 -d | head -n 2
+```
+   - Expected: decoded output starts with `{` and contains service account fields.
+8. Open `Environment` section and add env vars:
    - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
    - `REDIS_URL=<from Render Redis>`
    - `QUEUE_NAME=doc_jobs`
    - `CORS_ALLOW_ORIGINS=<your vercel domain>`
-   - `GOOGLE_APPLICATION_CREDENTIALS_JSON=<contents of SA JSON OR path strategy used by your runtime>`
-8. Click `Create Web Service` / `Deploy`.
-9. After first deploy, open service `Logs` and `Events`.
+   - `GOOGLE_APPLICATION_CREDENTIALS_JSON=<contents of /tmp/gcp_sa_b64.txt>`
+9. Click `Create Web Service` / `Deploy`.
+10. After first deploy, open service `Logs` and `Events`.
 
 Verification:
 - Deploy logs succeed
