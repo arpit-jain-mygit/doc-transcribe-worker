@@ -399,24 +399,17 @@ Verification:
    - Runtime: Python
    - Build command: as defined in repo
    - Start command: as defined in repo
-7. Prepare `GOOGLE_APPLICATION_CREDENTIALS_JSON` value (required by API code):
-   - Source file: `~/.gcp-keys/doc-transcribe-runtime.json` (created in step `1.8`)
-   - API expects this value as **base64-encoded JSON string**
-   - Generate one-line base64 string:
-```bash
-base64 < ~/.gcp-keys/doc-transcribe-runtime.json | tr -d '\n' > /tmp/gcp_sa_b64.txt
-```
-   - Verify decode works:
-```bash
-cat /tmp/gcp_sa_b64.txt | base64 -d | head -n 2
-```
-   - Expected: decoded output starts with `{` and contains service account fields.
+7. Add service account JSON as Render Secret File:
+   - In API service page, open `Environment` -> `Secret Files`
+   - Filename: `gcp-sa.json`
+   - Contents: paste full JSON from `~/.gcp-keys/doc-transcribe-runtime.json`
+   - Render mounts it at `/etc/secrets/gcp-sa.json`
 8. Open `Environment` section and add env vars:
    - `GCS_BUCKET_NAME=my-project-transcription-16may-output`
    - `REDIS_URL=<from Render Redis>`
    - `QUEUE_NAME=doc_jobs`
    - `CORS_ALLOW_ORIGINS=<your vercel domain>`
-   - `GOOGLE_APPLICATION_CREDENTIALS_JSON=<contents of /tmp/gcp_sa_b64.txt>`
+   - `GOOGLE_APPLICATION_CREDENTIALS=/etc/secrets/gcp-sa.json`
 9. Click `Create Web Service` / `Deploy`.
 10. After first deploy, open service `Logs` and `Events`.
 
@@ -507,8 +500,8 @@ Verification:
   - wrong service account or missing bucket IAM (`roles/storage.objectAdmin` / `roles/storage.objectViewer`)
 
 - credential parse errors:
-  - malformed `GOOGLE_APPLICATION_CREDENTIALS_JSON`
-  - use SA JSON content or stable path-based strategy
+  - invalid service account JSON file path/content
+  - verify `GOOGLE_APPLICATION_CREDENTIALS` points to a valid JSON key file
 
 - API upload 200 but worker fails:
   - API and worker env mismatch (`GCS_BUCKET_NAME`, `GCP_PROJECT_ID`, credentials)

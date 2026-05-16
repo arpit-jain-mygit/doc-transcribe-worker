@@ -122,9 +122,11 @@ def validate_startup_env() -> None:
     _validate_int_range("RETRY_BUDGET_MEDIA", errors, min_value=0, max_value=10)
     _validate_int_range("RETRY_BUDGET_DEFAULT", errors, min_value=0, max_value=10)
 
-    if _is_blank(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")):
+    if _is_blank(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")) and _is_blank(
+        os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    ):
         warnings.append(
-            "GOOGLE_APPLICATION_CREDENTIALS_JSON is not set; relying on ambient ADC credentials"
+            "Neither GOOGLE_APPLICATION_CREDENTIALS nor GOOGLE_APPLICATION_CREDENTIALS_JSON is set; relying on ambient ADC credentials"
         )
 
     if errors:

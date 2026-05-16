@@ -46,7 +46,8 @@ Core:
 
 Processing/GCP:
 - `GCS_BUCKET_NAME`
-- `GOOGLE_APPLICATION_CREDENTIALS_JSON` (base64 json credentials)
+- `GOOGLE_APPLICATION_CREDENTIALS` (path to service-account JSON file)
+- Compatibility fallback: `GOOGLE_APPLICATION_CREDENTIALS_JSON` (base64 json credentials)
 - Any model/provider env vars required by OCR/transcription modules
 
 Processing strategy knobs (optional):
@@ -154,7 +155,7 @@ Cause:
 - missing/invalid credentials or bucket env vars.
 
 Fix:
-- verify `GCS_BUCKET_NAME` and `GOOGLE_APPLICATION_CREDENTIALS_JSON`.
+- verify `GCS_BUCKET_NAME` and `GOOGLE_APPLICATION_CREDENTIALS` (or compatibility fallback `GOOGLE_APPLICATION_CREDENTIALS_JSON`).
 
 ## 12. Useful Commands
 
