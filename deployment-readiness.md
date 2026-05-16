@@ -217,15 +217,20 @@ If it still fails, continue setup and treat this as optional quota-alignment (no
 
 ### 1.3 Enable billing
 1. Console -> `Billing`
-2. Link your new project to billing account (free tier credits are okay)
+2. Link your new project to billing account `sachin.arpit.gcp.may2026.free.billing.account` (free tier credits are okay)
 3. If you see a red banner saying account must be verified, click `Verify account` and complete verification.
 4. After verification, open `Billing` -> `Account management` -> `Projects linked` and confirm your project is listed.
 5. If you see `No active billing accounts`:
    - Click `Manage billing accounts`
-   - Create a new billing account (Individual profile)
+   - Create a new billing account named `sachin.arpit.gcp.may2026.free.billing.account` (Individual profile)
    - Complete payment profile and payment method verification
    - Return to project billing page and click `Link a billing account`
-   - Select the newly active billing account
+   - Select `sachin.arpit.gcp.may2026.free.billing.account`
+6. If billing account status is `Closed`, reopen it using prepayment flow:
+   - Open [Google Payments](https://payments.google.com)
+   - Click the bell icon (top-right notifications)
+   - Click `Pay now` for the billing account that must be reopened
+   - Complete prepayment, then return to GCP Billing and verify status is `Open/Active`
 
 Verification:
 1. Red verification banner is no longer shown.
