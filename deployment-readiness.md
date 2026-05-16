@@ -202,19 +202,16 @@ gcloud auth login sachin.arpit.gcp.may2026@gmail.com
 ```bash
 gcloud config set account sachin.arpit.gcp.may2026@gmail.com
 ```
-3. List projects visible to this account:
+3. Confirm active account:
 ```bash
-gcloud projects list --format="table(projectId,name)"
+gcloud auth list
+gcloud config get-value account
 ```
-4. Set active project (use projectId, not display name):
-```bash
-gcloud config set project <your-project-id>
-```
+4. Return to step `1.2` to set active project using projectId.
 
 Verification:
 1. `gcloud config get-value account` returns `sachin.arpit.gcp.may2026@gmail.com`
-2. `gcloud config get-value project` returns your intended projectId
-3. In `gcloud auth list`, active account label should correspond to `sachin.arpit.gcp.may2026`
+2. In `gcloud auth list`, active account label should correspond to `sachin.arpit.gcp.may2026`
 
 ---
 
