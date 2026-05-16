@@ -43,6 +43,28 @@ Verification:
 1. Free trial credits are visible in Cloud Console
 2. No forced organization-document flow is shown
 
+### 0.4 Use the new account in `gcloud` config
+1. Login with the new account in CLI:
+```bash
+gcloud auth login sachin.arpit.gcp.may2026@gmail.com
+```
+2. Set active account:
+```bash
+gcloud config set account sachin.arpit.gcp.may2026@gmail.com
+```
+3. List projects visible to this account:
+```bash
+gcloud projects list --format="table(projectId,name)"
+```
+4. Set active project (use projectId, not display name):
+```bash
+gcloud config set project <your-project-id>
+```
+
+Verification:
+1. `gcloud config get-value account` returns `sachin.arpit.gcp.may2026@gmail.com`
+2. `gcloud config get-value project` returns your intended projectId
+
 ---
 
 ## 1) GCP Setup (Detailed + Verification After Each Step)
