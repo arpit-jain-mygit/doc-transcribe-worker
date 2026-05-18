@@ -135,6 +135,24 @@ Expected:
 - `gcloud config get-value account` shows the account you intend to use
 - In `gcloud auth list`, active account has `*`
 
+#### 1.1.5 Install Poppler for OCR PDF processing (local worker prerequisite)
+Install:
+```bash
+brew install poppler
+```
+
+Verification:
+```bash
+pdfinfo -v
+```
+Expected:
+- `pdfinfo` command is available and prints version.
+
+Troubleshooting:
+- If worker logs show
+  `PDFInfoNotInstalledError: Unable to get page count. Is poppler installed and in PATH?`
+  then Poppler is missing or not on PATH.
+
 ---
 
 ### 1.2 Use the new account in `gcloud` config
@@ -491,6 +509,7 @@ export REDIS_URL="rediss://<your-render-redis-url>"
 export QUEUE_MODE="single"
 export QUEUE_NAME="doc_jobs"
 export DLQ_NAME="doc_jobs_dead"
+export OCR_PAGE_BATCH_SIZE="25"
 export PROMPT_FILE="prompts/prompt.txt"
 export PROMPT_NAME="PRAVACHAN_PROMPT"
 export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.gcp-keys/doc-transcribe-runtime.json"
@@ -538,6 +557,51 @@ Verification:
  - Example command:
 ```bash
 grep -E "worker_gcp_config|gcloud_active_account=|gcp_identity source=" /tmp/worker-live.log
+```
+
+### 4.3 Cleanup queued/inflight jobs (local ops)
+If you need to clear stuck/pending jobs:
+
+```bash
+cd /Users/arpit/Documents/Codex/2026-04-30-import-repos-https-github-com-arpit/doc-transcribe-worker
+source .venv/bin/activate
+python - <<'PY'
+import os, redis
+r = redis.Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+
+keys = [
+    "doc_jobs",
+    "doc_jobs_dead",
+    "worker:inflight:OCR",
+    "worker:inflight:TRANSCRIPTION",
+    "worker:inflight:OTHER",
+]
+
+for k in keys:
+    t = r.type(k)
+    size = r.llen(k) if t == "list" else r.scard(k) if t == "set" else 0
+    print(f"{k} before: type={t} size={size}")
+
+r.delete(*keys)
+
+for k in keys:
+    print(f"{k} after: type={r.type(k)}")
+PY
+```
+
+If a specific job keeps reappearing, remove its status hash too:
+```bash
+cd /Users/arpit/Documents/Codex/2026-04-30-import-repos-https-github-com-arpit/doc-transcribe-worker
+source .venv/bin/activate
+python - <<'PY'
+import os, redis
+r = redis.Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+job_id = "<JOB_ID>"
+k = f"job_status:{job_id}"
+print("exists before:", r.exists(k))
+r.delete(k)
+print("exists after:", r.exists(k))
+PY
 ```
 
 ---
