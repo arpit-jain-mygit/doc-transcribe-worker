@@ -65,13 +65,22 @@ def _env_int(name: str, default: int) -> int:
         return default
     return int(str(raw).strip())
 
+ 
+def _env_int_alias(primary: str, legacy: str, default: int) -> int:
+    raw = os.getenv(primary)
+    if raw is None:
+        raw = os.getenv(legacy)
+    if raw is None:
+        return default
+    return int(str(raw).strip())
+
 
 OCR_DPI = _env_int("OCR_DPI", 300)
 OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
 OCR_PAGE_RETRIES = _env_int("OCR_PAGE_RETRIES", 2)
-OCR_429_COOLDOWN_SEC = _env_int("OCR_429_COOLDOWN_SEC", 60)
-OCR_429_COOLDOWN_LOG_INTERVAL_SEC = _env_int("OCR_429_COOLDOWN_LOG_INTERVAL_SEC", 10)
-OCR_429_MAX_COOLDOWNS_PER_PAGE = _env_int("OCR_429_MAX_COOLDOWNS_PER_PAGE", 30)
+GEMINI_429_COOLDOWN_SEC = _env_int_alias("GEMINI_429_COOLDOWN_SEC", "OCR_429_COOLDOWN_SEC", 60)
+GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC = _env_int_alias("GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC", "OCR_429_COOLDOWN_LOG_INTERVAL_SEC", 10)
+GEMINI_429_MAX_COOLDOWNS_PER_PAGE = _env_int_alias("GEMINI_429_MAX_COOLDOWNS_PER_PAGE", "OCR_429_MAX_COOLDOWNS_PER_PAGE", 30)
 OCR_ALLOW_EMPTY_PAGE_FALLBACK = str(os.getenv("OCR_ALLOW_EMPTY_PAGE_FALLBACK", "1")).strip().lower() not in ("0", "false", "no")
 
 if not PROJECT_ID:
@@ -82,12 +91,12 @@ if OCR_PAGE_BATCH_SIZE < 0:
     raise RuntimeError("OCR_PAGE_BATCH_SIZE must be >= 0")
 if OCR_PAGE_RETRIES < 0:
     raise RuntimeError("OCR_PAGE_RETRIES must be >= 0")
-if OCR_429_COOLDOWN_SEC < 1:
-    raise RuntimeError("OCR_429_COOLDOWN_SEC must be >= 1")
-if OCR_429_COOLDOWN_LOG_INTERVAL_SEC < 1:
-    raise RuntimeError("OCR_429_COOLDOWN_LOG_INTERVAL_SEC must be >= 1")
-if OCR_429_MAX_COOLDOWNS_PER_PAGE < 1:
-    raise RuntimeError("OCR_429_MAX_COOLDOWNS_PER_PAGE must be >= 1")
+if GEMINI_429_COOLDOWN_SEC < 1:
+    raise RuntimeError("GEMINI_429_COOLDOWN_SEC must be >= 1")
+if GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC < 1:
+    raise RuntimeError("GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC must be >= 1")
+if GEMINI_429_MAX_COOLDOWNS_PER_PAGE < 1:
+    raise RuntimeError("GEMINI_429_MAX_COOLDOWNS_PER_PAGE must be >= 1")
 
 # =========================================================
 # REDIS
@@ -241,7 +250,7 @@ def _wait_for_429_cooldown(*, page_num: int, cooldown_no: int, wait_sec: int) ->
         cooldown_no,
         wait_sec,
     )
-    step = max(1, OCR_429_COOLDOWN_LOG_INTERVAL_SEC)
+    step = max(1, GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC)
     remaining = wait_sec
     while remaining > 0:
         sleep_for = min(step, remaining)
@@ -410,12 +419,12 @@ def gemini_ocr_with_retries(image: Image.Image, page_num: int, job: dict) -> str
             if not _is_gemini_rate_limited(exc):
                 raise
             cooldown_count += 1
-            if cooldown_count > OCR_429_MAX_COOLDOWNS_PER_PAGE:
+            if cooldown_count > GEMINI_429_MAX_COOLDOWNS_PER_PAGE:
                 logger.error(
                     "ocr_rate_limit_cooldown_exhausted page=%s cooldowns=%s max=%s",
                     page_num,
                     cooldown_count - 1,
-                    OCR_429_MAX_COOLDOWNS_PER_PAGE,
+                    GEMINI_429_MAX_COOLDOWNS_PER_PAGE,
                 )
                 raise
             logger.warning(
@@ -424,13 +433,13 @@ def gemini_ocr_with_retries(image: Image.Image, page_num: int, job: dict) -> str
                 attempt,
                 attempts,
                 cooldown_count,
-                OCR_429_MAX_COOLDOWNS_PER_PAGE,
+                GEMINI_429_MAX_COOLDOWNS_PER_PAGE,
                 exc,
             )
             _wait_for_429_cooldown(
                 page_num=page_num,
                 cooldown_no=cooldown_count,
-                wait_sec=OCR_429_COOLDOWN_SEC,
+                wait_sec=GEMINI_429_COOLDOWN_SEC,
             )
             # Retry same page after cooldown without advancing the pipeline.
             continue
