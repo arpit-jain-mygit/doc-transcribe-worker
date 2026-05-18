@@ -510,10 +510,18 @@ export QUEUE_MODE="single"
 export QUEUE_NAME="doc_jobs"
 export DLQ_NAME="doc_jobs_dead"
 export OCR_PAGE_BATCH_SIZE="25"
+export OCR_429_COOLDOWN_SEC="60"
+export OCR_429_COOLDOWN_LOG_INTERVAL_SEC="10"
+export OCR_429_MAX_COOLDOWNS_PER_PAGE="30"
 export PROMPT_FILE="prompts/prompt.txt"
 export PROMPT_NAME="PRAVACHAN_PROMPT"
 export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.gcp-keys/doc-transcribe-runtime.json"
 ```
+
+Cooldown variable meaning:
+- `OCR_429_COOLDOWN_SEC`: cooldown wait in seconds when Gemini returns `429 ResourceExhausted`.
+- `OCR_429_COOLDOWN_LOG_INTERVAL_SEC`: log interval during cooldown wait.
+- `OCR_429_MAX_COOLDOWNS_PER_PAGE`: max cooldown cycles for one page before failing.
 
 Load config:
 ```bash
@@ -522,7 +530,7 @@ source ~/.zshrc
 
 Verification:
 ```bash
-env | grep -E "GCP_PROJECT_ID|GCS_BUCKET_NAME|QUEUE_NAME|DLQ_NAME|GOOGLE_APPLICATION_CREDENTIALS"
+env | grep -E "GCP_PROJECT_ID|GCS_BUCKET_NAME|QUEUE_NAME|DLQ_NAME|GOOGLE_APPLICATION_CREDENTIALS|OCR_429_COOLDOWN_SEC|OCR_429_COOLDOWN_LOG_INTERVAL_SEC|OCR_429_MAX_COOLDOWNS_PER_PAGE"
 ```
 Expected: all values appear.
 
