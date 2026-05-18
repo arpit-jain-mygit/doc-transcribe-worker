@@ -6,6 +6,7 @@ Drop-in replacement for pytesseract-based ocr.py
 """
 
 import io
+import math
 import json
 import logging
 import os
@@ -358,6 +359,17 @@ def run_ocr(job_id: str, job: dict) -> dict:
             total_pages = batch_total_pages
             log(f"PDF pages detected: {total_pages}")
 
+        batch_last_page = batch_first_page + len(pages) - 1
+        chunk_size = OCR_PAGE_BATCH_SIZE if OCR_PAGE_BATCH_SIZE > 0 else total_pages
+        chunk_index = ((batch_first_page - 1) // max(1, chunk_size)) + 1
+        total_chunks = max(1, math.ceil(total_pages / max(1, chunk_size)))
+
+        log(
+            f"OCR chunk created: chunk={chunk_index}/{total_chunks} "
+            f"page_range={batch_first_page}-{batch_last_page} "
+            f"pages_in_chunk={len(pages)} chunk_size_config={chunk_size}"
+        )
+
         for offset, page in enumerate(pages, start=0):
             idx = batch_first_page + offset
             processed_pages += 1
@@ -393,6 +405,12 @@ def run_ocr(job_id: str, job: dict) -> dict:
                     "ocr_page_metrics": json.dumps(page_metrics, ensure_ascii=False),
                 },
             )
+
+        log(
+            f"OCR chunk completed: chunk={chunk_index}/{total_chunks} "
+            f"processed_page_range={batch_first_page}-{batch_last_page} "
+            f"processed_pages_total={processed_pages}/{total_pages}"
+        )
 
     if total_pages <= 0:
         raise RuntimeError("No pages detected in input PDF")
