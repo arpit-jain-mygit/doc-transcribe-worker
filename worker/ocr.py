@@ -119,6 +119,12 @@ logger = logging.getLogger("worker.ocr")
 def log(msg: str):
     logger.info("[OCR %s] %s", datetime.utcnow().isoformat(), msg)
 
+
+class PageRateLimitExceeded(RuntimeError):
+    def __init__(self, page_num: int):
+        super().__init__(f"Gemini 429 cooldown exhausted for page {page_num}")
+        self.page_num = page_num
+
 # =========================================================
 # PROMPT
 # =========================================================
@@ -233,6 +239,32 @@ def cache_page_text(job_id: str, page_num: int, text: str) -> None:
 
 def clear_cached_page_texts(job_id: str) -> None:
     key = ocr_pages_cache_key(job_id)
+    _redis_retryable("redis_delete", key, lambda: r.delete(key))
+
+
+def ocr_failed_pages_cache_key(job_id: str) -> str:
+    return f"job_ocr_failed_pages:{job_id}"
+
+
+def load_cached_failed_pages(job_id: str) -> set[int]:
+    key = ocr_failed_pages_cache_key(job_id)
+    raw_members = _redis_retryable("redis_smembers", key, lambda: r.smembers(key) or set())
+    out: set[int] = set()
+    for raw in raw_members:
+        try:
+            out.add(int(str(raw).strip()))
+        except Exception:
+            continue
+    return out
+
+
+def cache_failed_page(job_id: str, page_num: int) -> None:
+    key = ocr_failed_pages_cache_key(job_id)
+    _redis_retryable("redis_sadd", f"{key}:{page_num}", lambda: r.sadd(key, str(page_num)))
+
+
+def clear_cached_failed_pages(job_id: str) -> None:
+    key = ocr_failed_pages_cache_key(job_id)
     _redis_retryable("redis_delete", key, lambda: r.delete(key))
 
 
@@ -426,7 +458,7 @@ def gemini_ocr_with_retries(image: Image.Image, page_num: int, job: dict) -> str
                     cooldown_count - 1,
                     GEMINI_429_MAX_COOLDOWNS_PER_PAGE,
                 )
-                raise
+                raise PageRateLimitExceeded(page_num)
             logger.warning(
                 "ocr_rate_limit_detected page=%s attempt=%s/%s cooldown_index=%s/%s error=%s",
                 page_num,
@@ -477,6 +509,7 @@ def run_ocr(job_id: str, job: dict) -> dict:
     total_pages = 0
     page_scores: List[float] = []
     all_quality_hints: List[str] = []
+    failed_rate_limited_pages: set[int] = load_cached_failed_pages(job_id)
     cached_pages = load_cached_page_texts(job_id)
     resume_page = max(cached_pages.keys(), default=0)
 
@@ -517,9 +550,22 @@ def run_ocr(job_id: str, job: dict) -> dict:
                 text = cached_pages[idx]
                 log(f"OCR resume page_hit: page={idx} source=checkpoint_cache")
             else:
-                text = gemini_ocr_with_retries(page, idx, job)
-                cache_page_text(job_id, idx, text)
-                log(f"OCR checkpoint saved: page={idx}")
+                try:
+                    text = gemini_ocr_with_retries(page, idx, job)
+                    cache_page_text(job_id, idx, text)
+                    log(f"OCR checkpoint saved: page={idx}")
+                except PageRateLimitExceeded:
+                    text = ""
+                    failed_rate_limited_pages.add(idx)
+                    cache_failed_page(job_id, idx)
+                    cache_page_text(job_id, idx, text)
+                    log(
+                        f"OCR page skipped after Gemini cooldown exhaustion: "
+                        f"page={idx} max_cooldowns={GEMINI_429_MAX_COOLDOWNS_PER_PAGE}"
+                    )
+                    all_quality_hints.append(
+                        f"Page {idx}: skipped after repeated Gemini 429 (cooldown exhausted)"
+                    )
             texts.append(text)
 
             page_score, page_metrics, page_hints = score_page(text, page)
@@ -559,6 +605,10 @@ def run_ocr(job_id: str, job: dict) -> dict:
     ocr_quality_score, low_confidence_pages = summarize_document_quality(
         page_scores=page_scores,
     )
+    for page_num in sorted(failed_rate_limited_pages):
+        if page_num not in low_confidence_pages:
+            low_confidence_pages.append(page_num)
+    low_confidence_pages = sorted(low_confidence_pages)
     quality_hints = all_quality_hints[:10]
 
     final_text = "\n\n".join(texts)
@@ -569,6 +619,7 @@ def run_ocr(job_id: str, job: dict) -> dict:
         destination_path=f"jobs/{job_id}/{output_filename}",
     )
     clear_cached_page_texts(job_id)
+    clear_cached_failed_pages(job_id)
 
     safe_hset(
         f"job_status:{job_id}",
@@ -590,7 +641,10 @@ def run_ocr(job_id: str, job: dict) -> dict:
         },
     )
 
-    log(f"OCR completed -> {uploaded['gcs_uri']} quality_score={ocr_quality_score} low_pages={len(low_confidence_pages)}")
+    log(
+        f"OCR completed -> {uploaded['gcs_uri']} quality_score={ocr_quality_score} "
+        f"low_pages={len(low_confidence_pages)} skipped_pages={len(failed_rate_limited_pages)}"
+    )
     return {
         "gcs_uri": uploaded["gcs_uri"],
         "output_filename": output_filename,
