@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import List
 
 import redis
+from google.api_core.exceptions import ResourceExhausted
 from dotenv import load_dotenv
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
@@ -68,6 +69,9 @@ def _env_int(name: str, default: int) -> int:
 OCR_DPI = _env_int("OCR_DPI", 300)
 OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
 OCR_PAGE_RETRIES = _env_int("OCR_PAGE_RETRIES", 2)
+OCR_429_COOLDOWN_SEC = _env_int("OCR_429_COOLDOWN_SEC", 60)
+OCR_429_COOLDOWN_LOG_INTERVAL_SEC = _env_int("OCR_429_COOLDOWN_LOG_INTERVAL_SEC", 10)
+OCR_429_MAX_COOLDOWNS_PER_PAGE = _env_int("OCR_429_MAX_COOLDOWNS_PER_PAGE", 30)
 OCR_ALLOW_EMPTY_PAGE_FALLBACK = str(os.getenv("OCR_ALLOW_EMPTY_PAGE_FALLBACK", "1")).strip().lower() not in ("0", "false", "no")
 
 if not PROJECT_ID:
@@ -78,6 +82,12 @@ if OCR_PAGE_BATCH_SIZE < 0:
     raise RuntimeError("OCR_PAGE_BATCH_SIZE must be >= 0")
 if OCR_PAGE_RETRIES < 0:
     raise RuntimeError("OCR_PAGE_RETRIES must be >= 0")
+if OCR_429_COOLDOWN_SEC < 1:
+    raise RuntimeError("OCR_429_COOLDOWN_SEC must be >= 1")
+if OCR_429_COOLDOWN_LOG_INTERVAL_SEC < 1:
+    raise RuntimeError("OCR_429_COOLDOWN_LOG_INTERVAL_SEC must be >= 1")
+if OCR_429_MAX_COOLDOWNS_PER_PAGE < 1:
+    raise RuntimeError("OCR_429_MAX_COOLDOWNS_PER_PAGE must be >= 1")
 
 # =========================================================
 # REDIS
@@ -174,6 +184,80 @@ def sanitize_filename(name: str, max_len: int = 180) -> str:
 def normalize_output_filename(raw_name: str | None) -> str:
     stem, _ = os.path.splitext(raw_name or "transcript")
     return f"{sanitize_filename(stem)}.txt"
+
+
+def ocr_pages_cache_key(job_id: str) -> str:
+    return f"job_ocr_pages:{job_id}"
+
+
+def _redis_retryable(op: str, target: str, fn):
+    def _on_retry(attempt: int, exc: BaseException) -> None:
+        logger.warning("ocr_redis_retry op=%s target=%s attempt=%s/%s error=%s", op, target, attempt, REDIS_POLICY.max_retries, exc)
+
+    return run_with_retry(
+        operation=op,
+        target=target,
+        fn=fn,
+        retryable=(redis.exceptions.ConnectionError, redis.exceptions.TimeoutError),
+        policy=REDIS_POLICY,
+        on_retry=_on_retry,
+    )
+
+
+def load_cached_page_texts(job_id: str) -> dict[int, str]:
+    key = ocr_pages_cache_key(job_id)
+    raw = _redis_retryable("redis_hgetall", key, lambda: r.hgetall(key) or {})
+    out: dict[int, str] = {}
+    for k, v in raw.items():
+        try:
+            page_num = int(k)
+        except Exception:
+            continue
+        out[page_num] = v or ""
+    return out
+
+
+def cache_page_text(job_id: str, page_num: int, text: str) -> None:
+    key = ocr_pages_cache_key(job_id)
+    _redis_retryable("redis_hset", f"{key}:{page_num}", lambda: r.hset(key, str(page_num), text))
+
+
+def clear_cached_page_texts(job_id: str) -> None:
+    key = ocr_pages_cache_key(job_id)
+    _redis_retryable("redis_delete", key, lambda: r.delete(key))
+
+
+def _is_gemini_rate_limited(exc: BaseException) -> bool:
+    if isinstance(exc, ResourceExhausted):
+        return True
+    msg = str(exc).lower()
+    return "resource exhausted" in msg or "statuscode.resource_exhausted" in msg or "429" in msg
+
+
+def _wait_for_429_cooldown(*, page_num: int, cooldown_no: int, wait_sec: int) -> None:
+    logger.warning(
+        "ocr_rate_limit_cooldown_started page=%s cooldown_index=%s wait_sec=%s",
+        page_num,
+        cooldown_no,
+        wait_sec,
+    )
+    step = max(1, OCR_429_COOLDOWN_LOG_INTERVAL_SEC)
+    remaining = wait_sec
+    while remaining > 0:
+        sleep_for = min(step, remaining)
+        logger.info(
+            "ocr_rate_limit_cooldown_waiting page=%s cooldown_index=%s remaining_sec=%s",
+            page_num,
+            cooldown_no,
+            remaining,
+        )
+        time.sleep(sleep_for)
+        remaining -= sleep_for
+    logger.warning(
+        "ocr_rate_limit_cooldown_finished page=%s cooldown_index=%s",
+        page_num,
+        cooldown_no,
+    )
 
 
 
@@ -298,7 +382,9 @@ def gemini_ocr(image: Image.Image, page_num: int, job: dict) -> str:
 def gemini_ocr_with_retries(image: Image.Image, page_num: int, job: dict) -> str:
     last_err: Exception | None = None
     attempts = OCR_PAGE_RETRIES + 1
-    for attempt in range(1, attempts + 1):
+    cooldown_count = 0
+    attempt = 1
+    while attempt <= attempts:
         try:
             return gemini_ocr(image, page_num, job)
         except RuntimeError as exc:
@@ -314,11 +400,40 @@ def gemini_ocr_with_retries(image: Image.Image, page_num: int, job: dict) -> str
             )
             if attempt < attempts:
                 time.sleep(min(1.5, 0.4 * attempt))
+                attempt += 1
                 continue
             if OCR_ALLOW_EMPTY_PAGE_FALLBACK:
                 logger.warning("ocr_empty_page_fallback job_page=%s using_placeholder=true", page_num)
                 return ""
             raise
+        except Exception as exc:
+            if not _is_gemini_rate_limited(exc):
+                raise
+            cooldown_count += 1
+            if cooldown_count > OCR_429_MAX_COOLDOWNS_PER_PAGE:
+                logger.error(
+                    "ocr_rate_limit_cooldown_exhausted page=%s cooldowns=%s max=%s",
+                    page_num,
+                    cooldown_count - 1,
+                    OCR_429_MAX_COOLDOWNS_PER_PAGE,
+                )
+                raise
+            logger.warning(
+                "ocr_rate_limit_detected page=%s attempt=%s/%s cooldown_index=%s/%s error=%s",
+                page_num,
+                attempt,
+                attempts,
+                cooldown_count,
+                OCR_429_MAX_COOLDOWNS_PER_PAGE,
+                exc,
+            )
+            _wait_for_429_cooldown(
+                page_num=page_num,
+                cooldown_no=cooldown_count,
+                wait_sec=OCR_429_COOLDOWN_SEC,
+            )
+            # Retry same page after cooldown without advancing the pipeline.
+            continue
     if last_err:
         raise last_err
     return ""
@@ -353,6 +468,14 @@ def run_ocr(job_id: str, job: dict) -> dict:
     total_pages = 0
     page_scores: List[float] = []
     all_quality_hints: List[str] = []
+    cached_pages = load_cached_page_texts(job_id)
+    resume_page = max(cached_pages.keys(), default=0)
+
+    if resume_page > 0:
+        log(
+            f"OCR resume checkpoint detected: resume_from_page={resume_page + 1} "
+            f"cached_pages={len(cached_pages)} job_id={job_id}"
+        )
 
     for batch_first_page, pages, batch_total_pages in iter_pdf_pages(input_path):
         if total_pages == 0:
@@ -381,7 +504,13 @@ def run_ocr(job_id: str, job: dict) -> dict:
                 progress=10 + int((idx / total_pages) * 80),
             )
 
-            text = gemini_ocr_with_retries(page, idx, job)
+            if idx in cached_pages:
+                text = cached_pages[idx]
+                log(f"OCR resume page_hit: page={idx} source=checkpoint_cache")
+            else:
+                text = gemini_ocr_with_retries(page, idx, job)
+                cache_page_text(job_id, idx, text)
+                log(f"OCR checkpoint saved: page={idx}")
             texts.append(text)
 
             page_score, page_metrics, page_hints = score_page(text, page)
@@ -430,6 +559,7 @@ def run_ocr(job_id: str, job: dict) -> dict:
         content=final_text,
         destination_path=f"jobs/{job_id}/{output_filename}",
     )
+    clear_cached_page_texts(job_id)
 
     safe_hset(
         f"job_status:{job_id}",
