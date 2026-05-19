@@ -79,6 +79,7 @@ OCR_DPI = _env_int("OCR_DPI", 300)
 OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
 OCR_PAGE_RETRIES = _env_int("OCR_PAGE_RETRIES", 2)
 GEMINI_PAGES_PER_REQUEST = _env_int("GEMINI_PAGES_PER_REQUEST", 1)
+GEMINI_BATCH_JSON_REPAIR_ATTEMPTS = _env_int("GEMINI_BATCH_JSON_REPAIR_ATTEMPTS", 2)
 GEMINI_429_COOLDOWN_SEC = _env_int_alias("GEMINI_429_COOLDOWN_SEC", "OCR_429_COOLDOWN_SEC", 60)
 GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC = _env_int_alias("GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC", "OCR_429_COOLDOWN_LOG_INTERVAL_SEC", 10)
 GEMINI_429_MAX_COOLDOWNS_PER_PAGE = _env_int_alias("GEMINI_429_MAX_COOLDOWNS_PER_PAGE", "OCR_429_MAX_COOLDOWNS_PER_PAGE", 30)
@@ -94,6 +95,8 @@ if OCR_PAGE_RETRIES < 0:
     raise RuntimeError("OCR_PAGE_RETRIES must be >= 0")
 if GEMINI_PAGES_PER_REQUEST < 1:
     raise RuntimeError("GEMINI_PAGES_PER_REQUEST must be >= 1")
+if GEMINI_BATCH_JSON_REPAIR_ATTEMPTS < 0:
+    raise RuntimeError("GEMINI_BATCH_JSON_REPAIR_ATTEMPTS must be >= 0")
 if GEMINI_429_COOLDOWN_SEC < 1:
     raise RuntimeError("GEMINI_429_COOLDOWN_SEC must be >= 1")
 if GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC < 1:
@@ -127,6 +130,13 @@ class PageRateLimitExceeded(RuntimeError):
     def __init__(self, page_num: int):
         super().__init__(f"Gemini 429 cooldown exhausted for page {page_num}")
         self.page_num = page_num
+
+
+class BatchPayloadParseError(RuntimeError):
+    def __init__(self, message: str, *, page_numbers: list[int], raw_text: str):
+        super().__init__(message)
+        self.page_numbers = page_numbers
+        self.raw_text = raw_text
 
 # =========================================================
 # PROMPT
@@ -475,10 +485,23 @@ def gemini_ocr_batch(page_items: list[tuple[int, Image.Image]], job: dict) -> di
     if not raw_text:
         raise RuntimeError(f"Empty OCR output for batch pages={page_numbers}")
 
-    obj = json.loads(_extract_json_object(raw_text))
-    rows = obj.get("pages")
-    if not isinstance(rows, list):
-        raise RuntimeError("Batch OCR response missing 'pages' list")
+    try:
+        obj = json.loads(_extract_json_object(raw_text))
+        rows = obj.get("pages")
+        if not isinstance(rows, list):
+            raise BatchPayloadParseError(
+                "Batch OCR response missing 'pages' list",
+                page_numbers=page_numbers,
+                raw_text=raw_text,
+            )
+    except BatchPayloadParseError:
+        raise
+    except Exception as exc:
+        raise BatchPayloadParseError(
+            f"Batch OCR response parse failed: {exc}",
+            page_numbers=page_numbers,
+            raw_text=raw_text,
+        ) from exc
 
     out: dict[int, str] = {}
     for item in rows:
@@ -494,8 +517,55 @@ def gemini_ocr_batch(page_items: list[tuple[int, Image.Image]], job: dict) -> di
 
     missing = [p for p in page_numbers if p not in out]
     if missing:
-        raise RuntimeError(f"Batch OCR response missing pages={missing}")
+        raise BatchPayloadParseError(
+            f"Batch OCR response missing pages={missing}",
+            page_numbers=page_numbers,
+            raw_text=raw_text,
+        )
 
+    return out
+
+
+def gemini_repair_batch_payload(raw_text: str, page_numbers: list[int]) -> dict[int, str]:
+    pages_csv = ",".join(str(p) for p in page_numbers)
+    repair_prompt = (
+        "You are a JSON repair tool.\n"
+        f"The expected pages are: {pages_csv}.\n"
+        "Repair the following OCR output into strict valid JSON with this schema only:\n"
+        '{"pages":[{"page":<int>,"text":"<string>"}]}\n'
+        "Rules:\n"
+        "- Output only JSON, no markdown.\n"
+        "- Include all expected pages exactly once.\n"
+        "- Preserve text verbatim as much as possible.\n\n"
+        "INPUT TO REPAIR:\n"
+        f"{raw_text}"
+    )
+    response = model.generate_content(
+        [Part.from_text(repair_prompt)],
+        generation_config={
+            "temperature": 0,
+            "max_output_tokens": 8192,
+        },
+    )
+    repaired = str(response.text or "").strip()
+    obj = json.loads(_extract_json_object(repaired))
+    rows = obj.get("pages")
+    if not isinstance(rows, list):
+        raise RuntimeError("Batch JSON repair response missing 'pages' list")
+    out: dict[int, str] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        try:
+            p = int(item.get("page"))
+        except Exception:
+            continue
+        if p not in page_numbers:
+            continue
+        out[p] = str(item.get("text") or "").strip()
+    missing = [p for p in page_numbers if p not in out]
+    if missing:
+        raise RuntimeError(f"Batch JSON repair missing pages={missing}")
     return out
 
 
@@ -598,6 +668,7 @@ def gemini_ocr_batch_with_retries(page_items: list[tuple[int, Image.Image]], job
             )
             continue
 
+
 # =========================================================
 # WORKER ENTRYPOINT
 # =========================================================
@@ -657,82 +728,67 @@ def run_ocr(job_id: str, job: dict) -> dict:
 
         batched_items: list[tuple[int, Image.Image]] = []
 
-        def flush_batched_items():
-            nonlocal processed_pages, batched_items
-            if not batched_items:
-                return
-            if len(batched_items) == 1:
-                only_idx, only_page = batched_items[0]
-                try:
-                    text_single = gemini_ocr_with_retries(only_page, only_idx, job)
-                    cache_page_text(job_id, only_idx, text_single)
-                    log(f"OCR checkpoint saved: page={only_idx}")
-                except PageRateLimitExceeded:
-                    text_single = ""
-                    failed_rate_limited_pages.add(only_idx)
-                    cache_failed_page(job_id, only_idx)
-                    cache_page_text(job_id, only_idx, text_single)
-                    log(
-                        f"OCR page skipped after Gemini cooldown exhaustion: "
-                        f"page={only_idx} max_cooldowns={GEMINI_429_MAX_COOLDOWNS_PER_PAGE}"
-                    )
-                    all_quality_hints.append(
-                        f"Page {only_idx}: skipped after repeated Gemini 429 (cooldown exhausted)"
-                    )
-                texts.append(text_single)
-                page_score, page_metrics, page_hints = score_page(text_single, only_page)
-                page_scores.append(page_score)
-                if page_hints:
-                    all_quality_hints.extend([f"Page {only_idx}: {hint}" for hint in page_hints])
-                if not text_single:
-                    all_quality_hints.append(f"Page {only_idx}: OCR response was empty after retries")
-                elapsed = time.perf_counter() - start
-                avg = elapsed / max(1, processed_pages)
-                eta = int(avg * (total_pages - only_idx))
-                safe_hset(
-                    f"job_status:{job_id}",
-                    {
-                        "current_page": only_idx,
-                        "total_pages": total_pages,
-                        "eta_sec": eta,
-                        "ocr_page_score": page_score,
-                        "ocr_page_metrics": json.dumps(page_metrics, ensure_ascii=False),
-                    },
+        def emit_page_result(page_num: int, page_obj: Image.Image, text_value: str):
+            texts.append(text_value)
+            page_score, page_metrics, page_hints = score_page(text_value, page_obj)
+            page_scores.append(page_score)
+            if page_hints:
+                all_quality_hints.extend([f"Page {page_num}: {hint}" for hint in page_hints])
+            if not text_value:
+                all_quality_hints.append(f"Page {page_num}: OCR response was empty after retries")
+            elapsed = time.perf_counter() - start
+            avg = elapsed / max(1, processed_pages)
+            eta = int(avg * (total_pages - page_num))
+            safe_hset(
+                f"job_status:{job_id}",
+                {
+                    "current_page": page_num,
+                    "total_pages": total_pages,
+                    "eta_sec": eta,
+                    "ocr_page_score": page_score,
+                    "ocr_page_metrics": json.dumps(page_metrics, ensure_ascii=False),
+                },
+            )
+
+        def process_single_item(page_num: int, page_obj: Image.Image):
+            try:
+                text_single = gemini_ocr_with_retries(page_obj, page_num, job)
+                cache_page_text(job_id, page_num, text_single)
+                log(f"OCR checkpoint saved: page={page_num}")
+            except PageRateLimitExceeded:
+                text_single = ""
+                failed_rate_limited_pages.add(page_num)
+                cache_failed_page(job_id, page_num)
+                cache_page_text(job_id, page_num, text_single)
+                log(
+                    f"OCR page skipped after Gemini cooldown exhaustion: "
+                    f"page={page_num} max_cooldowns={GEMINI_429_MAX_COOLDOWNS_PER_PAGE}"
                 )
-                batched_items = []
+                all_quality_hints.append(
+                    f"Page {page_num}: skipped after repeated Gemini 429 (cooldown exhausted)"
+                )
+            emit_page_result(page_num, page_obj, text_single)
+
+        def process_batch_items_adaptive(items: list[tuple[int, Image.Image]], depth: int = 0):
+            if not items:
+                return
+            if len(items) == 1:
+                only_num, only_page = items[0]
+                process_single_item(only_num, only_page)
                 return
 
-            page_nums = [p for p, _ in batched_items]
+            page_nums = [p for p, _ in items]
             log(f"OCR gemini_batch dispatch pages={page_nums}")
             try:
-                batch_texts = gemini_ocr_batch_with_retries(batched_items, job)
-                for page_num, page_obj in batched_items:
+                batch_texts = gemini_ocr_batch_with_retries(items, job)
+                for page_num, page_obj in items:
                     text_batch = batch_texts.get(page_num, "")
                     cache_page_text(job_id, page_num, text_batch)
                     log(f"OCR checkpoint saved: page={page_num}")
-                    texts.append(text_batch)
-                    page_score, page_metrics, page_hints = score_page(text_batch, page_obj)
-                    page_scores.append(page_score)
-                    if page_hints:
-                        all_quality_hints.extend([f"Page {page_num}: {hint}" for hint in page_hints])
-                    if not text_batch:
-                        all_quality_hints.append(f"Page {page_num}: OCR response was empty after retries")
-                    elapsed = time.perf_counter() - start
-                    avg = elapsed / max(1, processed_pages)
-                    eta = int(avg * (total_pages - page_num))
-                    safe_hset(
-                        f"job_status:{job_id}",
-                        {
-                            "current_page": page_num,
-                            "total_pages": total_pages,
-                            "eta_sec": eta,
-                            "ocr_page_score": page_score,
-                            "ocr_page_metrics": json.dumps(page_metrics, ensure_ascii=False),
-                        },
-                    )
+                    emit_page_result(page_num, page_obj, text_batch)
+                return
             except PageRateLimitExceeded:
-                for page_num, _page_obj in batched_items:
-                    texts.append("")
+                for page_num, _page_obj in items:
                     failed_rate_limited_pages.add(page_num)
                     cache_failed_page(job_id, page_num)
                     cache_page_text(job_id, page_num, "")
@@ -743,6 +799,73 @@ def run_ocr(job_id: str, job: dict) -> dict:
                     all_quality_hints.append(
                         f"Page {page_num}: skipped after repeated Gemini 429 (cooldown exhausted)"
                     )
+                for page_num, page_obj in items:
+                    emit_page_result(page_num, page_obj, "")
+                return
+            except BatchPayloadParseError as exc:
+                repaired_map: dict[int, str] | None = None
+                if GEMINI_BATCH_JSON_REPAIR_ATTEMPTS > 0:
+                    for attempt in range(1, GEMINI_BATCH_JSON_REPAIR_ATTEMPTS + 1):
+                        try:
+                            logger.warning(
+                                "ocr_batch_json_repair_attempt pages=%s attempt=%s/%s",
+                                page_nums,
+                                attempt,
+                                GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
+                            )
+                            repaired_map = gemini_repair_batch_payload(exc.raw_text, page_nums)
+                            logger.info(
+                                "ocr_batch_json_repair_success pages=%s attempt=%s/%s",
+                                page_nums,
+                                attempt,
+                                GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
+                            )
+                            break
+                        except Exception as repair_exc:
+                            logger.warning(
+                                "ocr_batch_json_repair_failed pages=%s attempt=%s/%s error=%s",
+                                page_nums,
+                                attempt,
+                                GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
+                                repair_exc,
+                            )
+                if repaired_map is not None:
+                    for page_num, page_obj in items:
+                        txt = repaired_map.get(page_num, "")
+                        cache_page_text(job_id, page_num, txt)
+                        log(f"OCR checkpoint saved: page={page_num}")
+                        emit_page_result(page_num, page_obj, txt)
+                    return
+                logger.warning(
+                    "ocr_batch_payload_parse_failed pages=%s depth=%s adaptive_action=split",
+                    page_nums,
+                    depth,
+                )
+                if len(items) <= 2:
+                    for page_num, page_obj in items:
+                        process_single_item(page_num, page_obj)
+                    return
+                mid = len(items) // 2
+                left = items[:mid]
+                right = items[mid:]
+                logger.warning(
+                    "ocr_batch_split pages=%s left=%s right=%s depth=%s",
+                    page_nums,
+                    [p for p, _ in left],
+                    [p for p, _ in right],
+                    depth + 1,
+                )
+                process_batch_items_adaptive(left, depth + 1)
+                process_batch_items_adaptive(right, depth + 1)
+                return
+            except Exception:
+                raise
+
+        def flush_batched_items():
+            nonlocal processed_pages, batched_items
+            if not batched_items:
+                return
+            process_batch_items_adaptive(batched_items, depth=0)
             batched_items = []
 
         for offset, page in enumerate(pages, start=0):
