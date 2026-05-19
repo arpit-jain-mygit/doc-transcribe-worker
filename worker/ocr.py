@@ -340,7 +340,7 @@ def _extract_json_object(text: str) -> str:
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise RuntimeError("Batch OCR response does not contain JSON object")
+        raise RuntimeError("JSON object not found in response")
     return raw[start : end + 1]
 
 
@@ -532,7 +532,7 @@ def gemini_ocr_batch(page_items: list[tuple[int, Image.Image]], job: dict) -> di
             return out
         except Exception as json_exc:
             raise BatchPayloadParseError(
-                f"Batch parse failed (marker={marker_exc}; json={json_exc})",
+                f"Batch parse failed (marker_mode_error={marker_exc}; legacy_json_mode_error={json_exc})",
                 page_numbers=page_numbers,
                 raw_text=raw_text,
             ) from json_exc
@@ -566,25 +566,30 @@ def gemini_repair_batch_payload(raw_text: str, page_numbers: list[int]) -> dict[
         return _parse_batch_marker_output(repaired, page_numbers)
     except Exception as marker_exc:
         # backward compatible fallback to JSON repair responses
-        obj = json.loads(_extract_json_object(repaired))
-        rows = obj.get("pages")
-        if not isinstance(rows, list):
-            raise RuntimeError(f"Batch repair parse failed (marker={marker_exc}; json schema missing)")
-        out: dict[int, str] = {}
-        for item in rows:
-            if not isinstance(item, dict):
-                continue
-            try:
-                p = int(item.get("page"))
-            except Exception:
-                continue
-            if p not in page_numbers:
-                continue
-            out[p] = str(item.get("text") or "").strip()
-        missing = [p for p in page_numbers if p not in out]
-        if missing:
-            raise RuntimeError(f"Batch repair missing pages={missing}")
-        return out
+        try:
+            obj = json.loads(_extract_json_object(repaired))
+            rows = obj.get("pages")
+            if not isinstance(rows, list):
+                raise RuntimeError("legacy json schema missing pages list")
+            out: dict[int, str] = {}
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    p = int(item.get("page"))
+                except Exception:
+                    continue
+                if p not in page_numbers:
+                    continue
+                out[p] = str(item.get("text") or "").strip()
+            missing = [p for p in page_numbers if p not in out]
+            if missing:
+                raise RuntimeError(f"legacy json missing pages={missing}")
+            return out
+        except Exception as json_exc:
+            raise RuntimeError(
+                f"batch repair parse failed (marker_mode_error={marker_exc}; legacy_json_mode_error={json_exc})"
+            ) from json_exc
 
 
 # User value: retries transient empty-page model responses so one weak page does not fail full OCR job.
@@ -826,14 +831,14 @@ def run_ocr(job_id: str, job: dict) -> dict:
                     for attempt in range(1, GEMINI_BATCH_JSON_REPAIR_ATTEMPTS + 1):
                         try:
                             logger.warning(
-                                "ocr_batch_json_repair_attempt pages=%s attempt=%s/%s",
+                                "ocr_batch_marker_repair_attempt pages=%s attempt=%s/%s",
                                 page_nums,
                                 attempt,
                                 GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
                             )
                             repaired_map = gemini_repair_batch_payload(exc.raw_text, page_nums)
                             logger.info(
-                                "ocr_batch_json_repair_success pages=%s attempt=%s/%s",
+                                "ocr_batch_marker_repair_success pages=%s attempt=%s/%s",
                                 page_nums,
                                 attempt,
                                 GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
@@ -841,7 +846,7 @@ def run_ocr(job_id: str, job: dict) -> dict:
                             break
                         except Exception as repair_exc:
                             logger.warning(
-                                "ocr_batch_json_repair_failed pages=%s attempt=%s/%s error=%s",
+                                "ocr_batch_marker_repair_failed pages=%s attempt=%s/%s error=%s",
                                 page_nums,
                                 attempt,
                                 GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
