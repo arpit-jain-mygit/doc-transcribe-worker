@@ -510,6 +510,7 @@ export QUEUE_MODE="single"
 export QUEUE_NAME="doc_jobs"
 export DLQ_NAME="doc_jobs_dead"
 export OCR_PAGE_BATCH_SIZE="25"
+export GEMINI_PAGES_PER_REQUEST="25"
 export GEMINI_429_COOLDOWN_SEC="60"
 export GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC="10"
 export GEMINI_429_MAX_COOLDOWNS_PER_PAGE="30"
@@ -519,6 +520,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.gcp-keys/doc-transcribe-runtime.js
 ```
 
 Cooldown variable meaning:
+- `GEMINI_PAGES_PER_REQUEST`: pages sent in one Gemini request (`1` = old behavior, `25` = batch mode).
 - `GEMINI_429_COOLDOWN_SEC`: cooldown wait in seconds when Gemini returns `429 ResourceExhausted`.
 - `GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC`: log interval during cooldown wait.
 - `GEMINI_429_MAX_COOLDOWNS_PER_PAGE`: max cooldown cycles for one page before failing.
@@ -530,7 +532,7 @@ source ~/.zshrc
 
 Verification:
 ```bash
-env | grep -E "GCP_PROJECT_ID|GCS_BUCKET_NAME|QUEUE_NAME|DLQ_NAME|GOOGLE_APPLICATION_CREDENTIALS|GEMINI_429_COOLDOWN_SEC|GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC|GEMINI_429_MAX_COOLDOWNS_PER_PAGE"
+env | grep -E "GCP_PROJECT_ID|GCS_BUCKET_NAME|QUEUE_NAME|DLQ_NAME|GOOGLE_APPLICATION_CREDENTIALS|GEMINI_PAGES_PER_REQUEST|GEMINI_429_COOLDOWN_SEC|GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC|GEMINI_429_MAX_COOLDOWNS_PER_PAGE"
 ```
 Expected: all values appear.
 
