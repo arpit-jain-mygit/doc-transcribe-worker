@@ -198,10 +198,13 @@ def resolve_batch_ocr_prompt(job: dict, page_numbers: list[int]) -> str:
         "BATCH MODE INSTRUCTIONS:\n"
         f"- You are receiving multiple page images in this request.\n"
         f"- The pages, in order, are: {pages_csv}.\n"
-        "- Return ONLY valid JSON with this exact schema:\n"
-        '{"pages":[{"page":<int>,"text":"<verbatim transcription>"}]}\n'
-        "- Include one item per page in the same order.\n"
-        "- Do not add markdown fences, commentary, or extra keys."
+        "- Return plain text using this exact framing for EACH page:\n"
+        "<<<PAGE:<page_number>>>\n"
+        "<verbatim transcription for that page>\n"
+        "<<<END_PAGE>>>\n"
+        "- Use one block per page, same order as input.\n"
+        "- Do not return JSON.\n"
+        "- Do not add markdown fences or commentary."
     )
 
 # =========================================================
@@ -339,6 +342,23 @@ def _extract_json_object(text: str) -> str:
     if start == -1 or end == -1 or end <= start:
         raise RuntimeError("Batch OCR response does not contain JSON object")
     return raw[start : end + 1]
+
+
+def _parse_batch_marker_output(raw_text: str, expected_pages: list[int]) -> dict[int, str]:
+    text = str(raw_text or "").strip()
+    # Match each PAGE block; allow multiline OCR text.
+    pattern = re.compile(r"<<<PAGE:(\d+)>>>\s*([\s\S]*?)(?=<<<PAGE:\d+>>>|$)")
+    out: dict[int, str] = {}
+    for match in pattern.finditer(text):
+        page_num = int(match.group(1))
+        body = match.group(2)
+        body = re.sub(r"\s*<<<END_PAGE>>>\s*$", "", body).strip()
+        if page_num in expected_pages:
+            out[page_num] = body
+    missing = [p for p in expected_pages if p not in out]
+    if missing:
+        raise RuntimeError(f"Batch marker response missing pages={missing}")
+    return out
 
 
 
@@ -485,56 +505,50 @@ def gemini_ocr_batch(page_items: list[tuple[int, Image.Image]], job: dict) -> di
     if not raw_text:
         raise RuntimeError(f"Empty OCR output for batch pages={page_numbers}")
 
+    # Primary: marker-based parse (more robust than strict JSON for long OCR outputs).
     try:
-        obj = json.loads(_extract_json_object(raw_text))
-        rows = obj.get("pages")
-        if not isinstance(rows, list):
+        return _parse_batch_marker_output(raw_text, page_numbers)
+    except Exception as marker_exc:
+        # Secondary fallback: accept JSON payload if model returned old format.
+        try:
+            obj = json.loads(_extract_json_object(raw_text))
+            rows = obj.get("pages")
+            if not isinstance(rows, list):
+                raise RuntimeError("Batch OCR response missing 'pages' list")
+            out: dict[int, str] = {}
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    p = int(item.get("page"))
+                except Exception:
+                    continue
+                if p not in page_numbers:
+                    continue
+                out[p] = str(item.get("text") or "").strip()
+            missing = [p for p in page_numbers if p not in out]
+            if missing:
+                raise RuntimeError(f"Batch OCR response missing pages={missing}")
+            return out
+        except Exception as json_exc:
             raise BatchPayloadParseError(
-                "Batch OCR response missing 'pages' list",
+                f"Batch parse failed (marker={marker_exc}; json={json_exc})",
                 page_numbers=page_numbers,
                 raw_text=raw_text,
-            )
-    except BatchPayloadParseError:
-        raise
-    except Exception as exc:
-        raise BatchPayloadParseError(
-            f"Batch OCR response parse failed: {exc}",
-            page_numbers=page_numbers,
-            raw_text=raw_text,
-        ) from exc
-
-    out: dict[int, str] = {}
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        try:
-            p = int(item.get("page"))
-        except Exception:
-            continue
-        if p not in page_numbers:
-            continue
-        out[p] = str(item.get("text") or "").strip()
-
-    missing = [p for p in page_numbers if p not in out]
-    if missing:
-        raise BatchPayloadParseError(
-            f"Batch OCR response missing pages={missing}",
-            page_numbers=page_numbers,
-            raw_text=raw_text,
-        )
-
-    return out
+            ) from json_exc
 
 
 def gemini_repair_batch_payload(raw_text: str, page_numbers: list[int]) -> dict[int, str]:
     pages_csv = ",".join(str(p) for p in page_numbers)
     repair_prompt = (
-        "You are a JSON repair tool.\n"
+        "You are an OCR batch-output repair tool.\n"
         f"The expected pages are: {pages_csv}.\n"
-        "Repair the following OCR output into strict valid JSON with this schema only:\n"
-        '{"pages":[{"page":<int>,"text":"<string>"}]}\n'
+        "Rewrite the following OCR output into this exact marker format:\n"
+        "<<<PAGE:<page_number>>>\n"
+        "<verbatim transcription>\n"
+        "<<<END_PAGE>>>\n"
         "Rules:\n"
-        "- Output only JSON, no markdown.\n"
+        "- Output only marker blocks, no markdown.\n"
         "- Include all expected pages exactly once.\n"
         "- Preserve text verbatim as much as possible.\n\n"
         "INPUT TO REPAIR:\n"
@@ -548,25 +562,29 @@ def gemini_repair_batch_payload(raw_text: str, page_numbers: list[int]) -> dict[
         },
     )
     repaired = str(response.text or "").strip()
-    obj = json.loads(_extract_json_object(repaired))
-    rows = obj.get("pages")
-    if not isinstance(rows, list):
-        raise RuntimeError("Batch JSON repair response missing 'pages' list")
-    out: dict[int, str] = {}
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        try:
-            p = int(item.get("page"))
-        except Exception:
-            continue
-        if p not in page_numbers:
-            continue
-        out[p] = str(item.get("text") or "").strip()
-    missing = [p for p in page_numbers if p not in out]
-    if missing:
-        raise RuntimeError(f"Batch JSON repair missing pages={missing}")
-    return out
+    try:
+        return _parse_batch_marker_output(repaired, page_numbers)
+    except Exception as marker_exc:
+        # backward compatible fallback to JSON repair responses
+        obj = json.loads(_extract_json_object(repaired))
+        rows = obj.get("pages")
+        if not isinstance(rows, list):
+            raise RuntimeError(f"Batch repair parse failed (marker={marker_exc}; json schema missing)")
+        out: dict[int, str] = {}
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            try:
+                p = int(item.get("page"))
+            except Exception:
+                continue
+            if p not in page_numbers:
+                continue
+            out[p] = str(item.get("text") or "").strip()
+        missing = [p for p in page_numbers if p not in out]
+        if missing:
+            raise RuntimeError(f"Batch repair missing pages={missing}")
+        return out
 
 
 # User value: retries transient empty-page model responses so one weak page does not fail full OCR job.
