@@ -138,6 +138,25 @@ class BatchPayloadParseError(RuntimeError):
         self.page_numbers = page_numbers
         self.raw_text = raw_text
 
+
+def _safe_response_text(response) -> str:
+    """Best-effort extraction of text from Vertex response without throwing."""
+    try:
+        return str(response.text or "")
+    except Exception:
+        return ""
+
+
+def _response_finish_reason(response) -> str:
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            return ""
+        reason = getattr(candidates[0], "finish_reason", None)
+        return str(reason or "")
+    except Exception:
+        return ""
+
 # =========================================================
 # PROMPT
 # =========================================================
@@ -472,8 +491,11 @@ def gemini_ocr(image: Image.Image, page_num: int, job: dict) -> str:
     dt = round(time.perf_counter() - t0, 2)
     log(f"Gemini OCR completed page {page_num} in {dt}s")
 
-    text = (response.text or "").strip()
+    text = _safe_response_text(response).strip()
     if not text:
+        finish_reason = _response_finish_reason(response)
+        if finish_reason:
+            raise RuntimeError(f"Empty OCR output page {page_num} finish_reason={finish_reason}")
         raise RuntimeError(f"Empty OCR output page {page_num}")
 
     return text
@@ -501,9 +523,20 @@ def gemini_ocr_batch(page_items: list[tuple[int, Image.Image]], job: dict) -> di
     dt = round(time.perf_counter() - t0, 2)
     log(f"Gemini OCR batch completed pages={page_numbers} in {dt}s")
 
-    raw_text = (response.text or "").strip()
+    raw_text = _safe_response_text(response).strip()
     if not raw_text:
-        raise RuntimeError(f"Empty OCR output for batch pages={page_numbers}")
+        finish_reason = _response_finish_reason(response)
+        if finish_reason:
+            raise BatchPayloadParseError(
+                f"Batch OCR returned no text finish_reason={finish_reason}",
+                page_numbers=page_numbers,
+                raw_text="",
+            )
+        raise BatchPayloadParseError(
+            "Batch OCR returned no text",
+            page_numbers=page_numbers,
+            raw_text="",
+        )
 
     # Primary: marker-based parse (more robust than strict JSON for long OCR outputs).
     try:
@@ -827,7 +860,7 @@ def run_ocr(job_id: str, job: dict) -> dict:
                 return
             except BatchPayloadParseError as exc:
                 repaired_map: dict[int, str] | None = None
-                if GEMINI_BATCH_JSON_REPAIR_ATTEMPTS > 0:
+                if GEMINI_BATCH_JSON_REPAIR_ATTEMPTS > 0 and str(exc.raw_text or "").strip():
                     for attempt in range(1, GEMINI_BATCH_JSON_REPAIR_ATTEMPTS + 1):
                         try:
                             logger.warning(
@@ -852,6 +885,11 @@ def run_ocr(job_id: str, job: dict) -> dict:
                                 GEMINI_BATCH_JSON_REPAIR_ATTEMPTS,
                                 repair_exc,
                             )
+                elif GEMINI_BATCH_JSON_REPAIR_ATTEMPTS > 0:
+                    logger.warning(
+                        "ocr_batch_marker_repair_skipped pages=%s reason=empty_batch_response_text",
+                        page_nums,
+                    )
                 if repaired_map is not None:
                     for page_num, page_obj in items:
                         txt = repaired_map.get(page_num, "")
