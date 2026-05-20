@@ -823,6 +823,19 @@ def run_ocr(job_id: str, job: dict) -> dict:
                 all_quality_hints.append(
                     f"Page {page_num}: skipped after repeated Gemini 429 (cooldown exhausted)"
                 )
+            except Exception as exc:
+                text_single = ""
+                failed_rate_limited_pages.add(page_num)
+                cache_failed_page(job_id, page_num)
+                cache_page_text(job_id, page_num, text_single)
+                logger.warning(
+                    "ocr_page_skipped_after_retries page=%s reason=unrecoverable_error error=%s",
+                    page_num,
+                    exc,
+                )
+                all_quality_hints.append(
+                    f"Page {page_num}: skipped after unrecoverable OCR error ({exc.__class__.__name__})"
+                )
             emit_page_result(page_num, page_obj, text_single)
 
         def process_batch_items_adaptive(items: list[tuple[int, Image.Image]], depth: int = 0):
@@ -920,7 +933,19 @@ def run_ocr(job_id: str, job: dict) -> dict:
                 process_batch_items_adaptive(right, depth + 1)
                 return
             except Exception:
-                raise
+                logger.warning(
+                    "ocr_batch_unrecoverable_error pages=%s action=skip_pages",
+                    [p for p, _ in items],
+                )
+                for page_num, page_obj in items:
+                    failed_rate_limited_pages.add(page_num)
+                    cache_failed_page(job_id, page_num)
+                    cache_page_text(job_id, page_num, "")
+                    all_quality_hints.append(
+                        f"Page {page_num}: skipped after unrecoverable batch OCR error"
+                    )
+                    emit_page_result(page_num, page_obj, "")
+                return
 
         def flush_batched_items():
             nonlocal processed_pages, batched_items
