@@ -79,7 +79,7 @@ OCR_DPI = _env_int("OCR_DPI", 300)
 OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
 OCR_PAGE_RETRIES = _env_int("OCR_PAGE_RETRIES", 2)
 GEMINI_PAGES_PER_REQUEST = _env_int("GEMINI_PAGES_PER_REQUEST", 1)
-GEMINI_BATCH_JSON_REPAIR_ATTEMPTS = _env_int("GEMINI_BATCH_JSON_REPAIR_ATTEMPTS", 2)
+GEMINI_BATCH_JSON_REPAIR_ATTEMPTS = _env_int("GEMINI_BATCH_JSON_REPAIR_ATTEMPTS", 1)
 GEMINI_429_COOLDOWN_SEC = _env_int_alias("GEMINI_429_COOLDOWN_SEC", "OCR_429_COOLDOWN_SEC", 60)
 GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC = _env_int_alias("GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC", "OCR_429_COOLDOWN_LOG_INTERVAL_SEC", 10)
 GEMINI_429_MAX_COOLDOWNS_PER_PAGE = _env_int_alias("GEMINI_429_MAX_COOLDOWNS_PER_PAGE", "OCR_429_MAX_COOLDOWNS_PER_PAGE", 30)
@@ -911,26 +911,12 @@ def run_ocr(job_id: str, job: dict) -> dict:
                         emit_page_result(page_num, page_obj, txt)
                     return
                 logger.warning(
-                    "ocr_batch_payload_parse_failed pages=%s depth=%s adaptive_action=split",
+                    "ocr_batch_payload_parse_failed pages=%s depth=%s adaptive_action=single_page_fallback",
                     page_nums,
                     depth,
                 )
-                if len(items) <= 2:
-                    for page_num, page_obj in items:
-                        process_single_item(page_num, page_obj)
-                    return
-                mid = len(items) // 2
-                left = items[:mid]
-                right = items[mid:]
-                logger.warning(
-                    "ocr_batch_split pages=%s left=%s right=%s depth=%s",
-                    page_nums,
-                    [p for p, _ in left],
-                    [p for p, _ in right],
-                    depth + 1,
-                )
-                process_batch_items_adaptive(left, depth + 1)
-                process_batch_items_adaptive(right, depth + 1)
+                for page_num, page_obj in items:
+                    process_single_item(page_num, page_obj)
                 return
             except Exception:
                 logger.warning(
