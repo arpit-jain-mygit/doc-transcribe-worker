@@ -80,6 +80,7 @@ OCR_PAGE_BATCH_SIZE = _env_int("OCR_PAGE_BATCH_SIZE", 0)
 OCR_PAGE_RETRIES = _env_int("OCR_PAGE_RETRIES", 2)
 GEMINI_PAGES_PER_REQUEST = _env_int("GEMINI_PAGES_PER_REQUEST", 1)
 GEMINI_BATCH_JSON_REPAIR_ATTEMPTS = _env_int("GEMINI_BATCH_JSON_REPAIR_ATTEMPTS", 1)
+GEMINI_PREFLIGHT_PROBE = _env_int("GEMINI_PREFLIGHT_PROBE", 0)
 GEMINI_429_COOLDOWN_SEC = _env_int_alias("GEMINI_429_COOLDOWN_SEC", "OCR_429_COOLDOWN_SEC", 60)
 GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC = _env_int_alias("GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC", "OCR_429_COOLDOWN_LOG_INTERVAL_SEC", 10)
 GEMINI_429_MAX_COOLDOWNS_PER_PAGE = _env_int_alias("GEMINI_429_MAX_COOLDOWNS_PER_PAGE", "OCR_429_MAX_COOLDOWNS_PER_PAGE", 30)
@@ -97,6 +98,8 @@ if GEMINI_PAGES_PER_REQUEST < 1:
     raise RuntimeError("GEMINI_PAGES_PER_REQUEST must be >= 1")
 if GEMINI_BATCH_JSON_REPAIR_ATTEMPTS < 0:
     raise RuntimeError("GEMINI_BATCH_JSON_REPAIR_ATTEMPTS must be >= 0")
+if GEMINI_PREFLIGHT_PROBE < 0:
+    raise RuntimeError("GEMINI_PREFLIGHT_PROBE must be >= 0")
 if GEMINI_429_COOLDOWN_SEC < 1:
     raise RuntimeError("GEMINI_429_COOLDOWN_SEC must be >= 1")
 if GEMINI_429_COOLDOWN_LOG_INTERVAL_SEC < 1:
@@ -156,6 +159,48 @@ def _response_finish_reason(response) -> str:
         return str(reason or "")
     except Exception:
         return ""
+
+
+def gemini_preflight_probe(batch_pages: list[int]) -> bool:
+    """
+    Returns True if probe indicates we should proceed with heavy batch call.
+    Returns False when rate-limited (429) is detected.
+    Non-429 probe failures are treated as non-blocking and return True.
+    """
+    if GEMINI_PREFLIGHT_PROBE <= 0:
+        return True
+    pages_label = f"{min(batch_pages)}-{max(batch_pages)}" if batch_pages else "-"
+    logger.info("ocr_gemini_preflight_started batch_pages=%s", pages_label)
+    t0 = time.perf_counter()
+    try:
+        # tiny text-only probe to detect immediate rate limiting
+        _ = model.generate_content(
+            [Part.from_text("PING")],
+            generation_config={
+                "temperature": 0,
+                "max_output_tokens": 8,
+            },
+        )
+        dt = round(time.perf_counter() - t0, 2)
+        logger.info("ocr_gemini_preflight_passed batch_pages=%s latency_sec=%s", pages_label, dt)
+        return True
+    except Exception as exc:
+        dt = round(time.perf_counter() - t0, 2)
+        if _is_gemini_rate_limited(exc):
+            logger.warning(
+                "ocr_gemini_preflight_rate_limited batch_pages=%s latency_sec=%s error=%s",
+                pages_label,
+                dt,
+                exc,
+            )
+            return False
+        logger.warning(
+            "ocr_gemini_preflight_non_blocking_error batch_pages=%s latency_sec=%s error=%s",
+            pages_label,
+            dt,
+            exc,
+        )
+        return True
 
 # =========================================================
 # PROMPT
@@ -694,6 +739,30 @@ def gemini_ocr_batch_with_retries(page_items: list[tuple[int, Image.Image]], job
     last_page = max(page_numbers)
     cooldown_count = 0
     while True:
+        if not gemini_preflight_probe(page_numbers):
+            cooldown_count += 1
+            if cooldown_count > GEMINI_429_MAX_COOLDOWNS_PER_PAGE:
+                logger.error(
+                    "ocr_rate_limit_cooldown_exhausted batch_pages=%s-%s cooldowns=%s max=%s source=preflight",
+                    first_page,
+                    last_page,
+                    cooldown_count - 1,
+                    GEMINI_429_MAX_COOLDOWNS_PER_PAGE,
+                )
+                raise PageRateLimitExceeded(first_page)
+            logger.warning(
+                "ocr_rate_limit_detected batch_pages=%s-%s cooldown_index=%s/%s source=preflight",
+                first_page,
+                last_page,
+                cooldown_count,
+                GEMINI_429_MAX_COOLDOWNS_PER_PAGE,
+            )
+            _wait_for_429_cooldown(
+                page_num=first_page,
+                cooldown_no=cooldown_count,
+                wait_sec=GEMINI_429_COOLDOWN_SEC,
+            )
+            continue
         try:
             return gemini_ocr_batch(page_items, job)
         except Exception as exc:
